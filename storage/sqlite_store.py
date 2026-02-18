@@ -66,16 +66,15 @@ class SQLiteStore:
         except Exception:
             return
 
-        # Columns added over time. If a user already has an older DB file,
-        # SELECTs/INSERTs must not crash on missing columns.
+        # Older DBs may have only a subset of columns. We add missing ones
+        # to avoid runtime crashes when handlers query newer fields.
         required: Dict[str, str] = {
-            # Core payload fields
+            "source": "TEXT",
             "type": "TEXT",
             "title": "TEXT",
             "description": "TEXT",
             "url": "TEXT",
             "timestamp": "TEXT",
-            # Optional enrichments
             "chain": "TEXT",
             "sector": "TEXT",
             "signal_score": "REAL",
