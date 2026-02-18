@@ -1,102 +1,62 @@
-import datetime as dt
-import hashlib
 import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 import feedparser
 
+from utils.http import fetch_text
+
 logger = logging.getLogger(__name__)
 
-
 class NewsIngester:
-    """Fetch news via RSS feeds (low-rate, API-free)."""
-
     def __init__(self, config: Dict[str, Any], session):
         self.config = config
         self.session = session
+        ing = (config or {}).get("ingestion", {})
+        self.urls: List[str] = ing.get("news_sources") or config.get("news_rss", []) or []
 
-    def _sources(self) -> List[str]:
-        # Important: if ingestion.news_sources is present (even empty), do NOT fall back.
-        ingestion_cfg = self.config.get("ingestion", {})
-        if "news_sources" in ingestion_cfg:
-            return list(ingestion_cfg.get("news_sources") or [])
-        return list(self.config.get("news_sources") or [])
-
-    async def ingest(self, since: dt.datetime) -> List[Dict[str, Any]]:
-        sources = self._sources()
-        if not sources:
-            return []
-
-        timeout_s = float(self.config.get("http", {}).get("timeout_seconds", 15))
-
+    async def ingest(self, since: datetime) -> List[Dict[str, Any]]:
+        since_ts = since.astimezone(timezone.utc).timestamp()
+        attempted = len(self.urls)
+        ok = 0
+        fail = 0
+        exc_types: Dict[str, int] = {}
         out: List[Dict[str, Any]] = []
-        for url in sources:
+
+        for url in self.urls:
             try:
-                resp = await self.session.get(url, timeout=timeout_s)
-                resp.raise_for_status()
-                # Fix for internal bug: if a response-like object exposes `text` as a
-                # callable (or is accidentally shadowed), feedparser will receive a
-                # function and then crash trying to call `.encode()` on it.
-                text_attr = getattr(resp, "text", "")
-                content = text_attr() if callable(text_attr) else text_attr
+                content = await fetch_text(self.session, url)
                 feed = feedparser.parse(content)
 
-                for entry in feed.entries:
-                    published_dt = _parse_entry_datetime(entry)
-                    if published_dt is None:
-                        # If we can't parse a date, keep it but treat as "now" so it doesn't get stuck.
-                        published_dt = dt.datetime.utcnow()
-
-                    if published_dt < since:
+                for e in feed.entries:
+                    # published_parsed may be missing; fall back to now for ordering/filtering
+                    published = getattr(e, "published_parsed", None) or getattr(e, "updated_parsed", None)
+                    ts = datetime.now(timezone.utc).timestamp()
+                    if published:
+                        ts = datetime(*published[:6], tzinfo=timezone.utc).timestamp()
+                    if ts < since_ts:
                         continue
-
-                    title = (entry.get("title") or "").strip()
-                    link_val = entry.get("link")
-                    link = (str(link_val) if link_val is not None else "").strip()
-                    summary = (entry.get("summary") or entry.get("description") or "").strip()
-                    if not title or not link:
-                        continue
-
-                    dedup_key = hashlib.sha256(link.encode("utf-8")).hexdigest()
 
                     out.append(
                         {
-                            "dedup_key": dedup_key,
                             "source": "news",
-                            "type": "news",
-                            "title": title,
-                            "description": summary,
-                            "url": link,
-                            "timestamp": published_dt.isoformat(),
-                            "raw_json": "{}",
+                            "title": getattr(e, "title", "") or "",
+                            "url": getattr(e, "link", "") or "",
+                            "summary": getattr(e, "summary", "") or "",
+                            "created_at": datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(),
+                            "raw": {"feed_url": url},
                         }
                     )
 
-            except Exception as e:
-                logger.warning("NewsIngester failed for %s: %s", url, e)
+                ok += 1
+            except Exception as ex:
+                fail += 1
+                exc_types[type(ex).__name__] = exc_types.get(type(ex).__name__, 0) + 1
+                logger.warning("NewsIngester failed for %s: %s", url, ex)
 
+        logger.info(
+            "NewsIngester: sources=%d ok=%d fail=%d items=%d top_exceptions=%s",
+            attempted, ok, fail, len(out),
+            dict(sorted(exc_types.items(), key=lambda kv: kv[1], reverse=True)[:3]),
+        )
         return out
-
-
-def _parse_entry_datetime(entry: Any) -> dt.datetime | None:
-    # feedparser may give various date fields
-    for key in ("published_parsed", "updated_parsed"):
-        if key in entry and entry.get(key):
-            try:
-                tm = entry.get(key)
-                return dt.datetime(*tm[:6])
-            except Exception:
-                pass
-
-    # Try string fields
-    for key in ("published", "updated"):
-        v = entry.get(key)
-        if not v:
-            continue
-        try:
-            # best-effort ISO parse
-            return dt.datetime.fromisoformat(v.replace("Z", "+00:00")).replace(tzinfo=None)
-        except Exception:
-            continue
-
-    return None

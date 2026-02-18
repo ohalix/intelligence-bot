@@ -1,81 +1,75 @@
-import datetime as dt
-import hashlib
 import logging
-from typing import Any, Dict, List
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
+
+from utils.http import fetch_json
 
 logger = logging.getLogger(__name__)
 
+GITHUB_SEARCH_API = "https://api.github.com/search/repositories"
 
 class GitHubIngester:
-    """GitHub public search-based ingestion (no auth required).
-
-    Uses the GitHub REST Search API which is rate-limited but usable for low-frequency runs.
-    """
-
-    BASE = "https://api.github.com/search/repositories"
-
     def __init__(self, config: Dict[str, Any], session):
         self.config = config
         self.session = session
+        ing = (config or {}).get("ingestion", {})
+        self.topics: List[str] = ing.get("github_topics") or config.get("github_topics", []) or []
+        self.token: Optional[str] = (config or {}).get("keys", {}).get("github_token")
 
-    def _queries(self) -> List[str]:
-        ingestion_cfg = self.config.get("ingestion", {})
-        qs = ingestion_cfg.get("github_queries")
-        if qs is None:
-            qs = self.config.get("github_queries")
-        if isinstance(qs, str):
-            return [q.strip() for q in qs.split(",") if q.strip()]
-        return list(qs or [])
+    def _headers(self) -> Dict[str, str]:
+        h = {"Accept": "application/vnd.github+json"}
+        if self.token:
+            h["Authorization"] = f"Bearer {self.token}"
+        return h
 
-    async def ingest(self, since: dt.datetime) -> List[Dict[str, Any]]:
-        queries = self._queries()
-        if not queries:
-            return []
+    async def ingest(self, since: datetime) -> List[Dict[str, Any]]:
+        # GitHub search requires date granularity; keep a small rolling window
+        window_days = int((self.config or {}).get("analysis", {}).get("github_window_days", 7))
+        q_since = max(since.astimezone(timezone.utc), datetime.now(timezone.utc) - timedelta(days=window_days)).date().isoformat()
 
-        window_days = int(self.config.get("ingestion", {}).get("github_window_days", 7))
-        min_since = dt.datetime.utcnow() - dt.timedelta(days=window_days)
-        since_dt = max(since, min_since)
-        q_since = since_dt.date().isoformat()
-
-        headers = {"Accept": "application/vnd.github+json", "User-Agent": "Mozilla/5.0"}
-
+        attempted = len(self.topics) if self.topics else 1
+        ok = 0
+        fail = 0
+        exc_types: Dict[str, int] = {}
         out: List[Dict[str, Any]] = []
-        for q in queries:
+
+        topics = self.topics or ["web3"]
+        for topic in topics:
+            q = f"topic:{topic} pushed:>={q_since}"
+            params = {"q": q, "sort": "updated", "order": "desc", "per_page": 20}
             try:
-                params = {"q": f"{q} pushed:>={q_since}", "sort": "updated", "order": "desc", "per_page": 10}
-                async with self.session.get(self.BASE, params=params, headers=headers) as resp:
-                    if resp.status >= 400:
-                        raise RuntimeError(f"GitHub API HTTP {resp.status}")
-                    data = await resp.json()
-
-                for item in data.get("items", [])[:10]:
-                    url = item.get("html_url")
-                    title = item.get("full_name")
-                    desc = (item.get("description") or "").strip()
-                    updated_at = item.get("pushed_at") or item.get("updated_at")
-                    try:
-                        ts = dt.datetime.fromisoformat(updated_at.replace("Z", "+00:00")).replace(tzinfo=None)
-                    except Exception:
-                        ts = dt.datetime.utcnow()
-                    if ts < since:
+                data = await fetch_json(self.session, GITHUB_SEARCH_API, headers=self._headers(), params=params)
+                items = data.get("items", []) if isinstance(data, dict) else []
+                for it in items:
+                    updated_at = it.get("updated_at") or it.get("pushed_at") or it.get("created_at")
+                    # Filter in Python for precision
+                    ts = datetime.now(timezone.utc)
+                    if updated_at:
+                        try:
+                            ts = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+                        except Exception:
+                            ts = datetime.now(timezone.utc)
+                    if ts < since.astimezone(timezone.utc):
                         continue
-
-                    dedup_key = hashlib.sha256((url or title or "").encode("utf-8")).hexdigest()
-
                     out.append(
                         {
-                            "dedup_key": dedup_key,
                             "source": "github",
-                            "type": "github",
-                            "title": title or "",
-                            "description": desc,
-                            "url": url or "",
-                            "timestamp": ts.isoformat(),
-                            "raw_json": "{}",
+                            "title": it.get("full_name", ""),
+                            "url": it.get("html_url", ""),
+                            "summary": it.get("description", "") or "",
+                            "created_at": ts.astimezone(timezone.utc).isoformat(),
+                            "raw": {"topic": topic, "stars": it.get("stargazers_count"), "language": it.get("language")},
                         }
                     )
+                ok += 1
+            except Exception as ex:
+                fail += 1
+                exc_types[type(ex).__name__] = exc_types.get(type(ex).__name__, 0) + 1
+                logger.warning("GitHubIngester failed for topic=%s: %s", topic, ex)
 
-            except Exception as e:
-                logger.error("GitHubIngester failed: %s", e, exc_info=True)
-
+        logger.info(
+            "GitHubIngester: topics=%d ok=%d fail=%d items=%d top_exceptions=%s",
+            attempted, ok, fail, len(out),
+            dict(sorted(exc_types.items(), key=lambda kv: kv[1], reverse=True)[:3]),
+        )
         return out

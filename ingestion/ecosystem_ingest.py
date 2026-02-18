@@ -1,81 +1,64 @@
-import datetime as dt
 import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 import feedparser
 
-from .base_ingest import BaseIngester
 from utils.http import fetch_text
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_ECOSYSTEM_FEEDS = [
-    "https://blog.arbitrum.io/rss/",
-    # blog.optimism.io has recurring DNS issues; use maintained official feeds.
-    # Optimism blog (Mirror) Atom + Optimism developer blog RSS.
-    "https://optimism.mirror.xyz/feed/atom",
-    "https://dev.optimism.io/rss/",
-    "https://solana.com/rss.xml",
-]
-
-
-class EcosystemIngester(BaseIngester):
-    """Ingest ecosystem announcements from RSS/Atom feeds.
-
-    Contract: __init__(config, session)
-    """
-
+class EcosystemIngester:
     def __init__(self, config: Dict[str, Any], session):
-        super().__init__(config, session)
+        self.config = config
+        self.session = session
+        ing = (config or {}).get("ingestion", {})
+        self.urls: List[str] = ing.get("ecosystem_sources") or config.get("ecosystem_rss", []) or []
 
-    def _feeds(self) -> List[str]:
-        ingestion_cfg = self.config.get("ingestion", {})
-        if "ecosystem_sources" in ingestion_cfg:
-            return list(ingestion_cfg.get("ecosystem_sources") or [])
-        return list(ingestion_cfg.get("ecosystem_sources") or DEFAULT_ECOSYSTEM_FEEDS)
+    async def ingest(self, since: datetime) -> List[Dict[str, Any]]:
+        since_ts = since.astimezone(timezone.utc).timestamp()
+        attempted = len(self.urls)
+        ok = 0
+        fail = 0
+        exc_types: Dict[str, int] = {}
+        out: List[Dict[str, Any]] = []
 
-    async def ingest(self, since: dt.datetime) -> List[Dict[str, Any]]:
-        feeds = self._feeds()
-        if not feeds:
-            return []
-
-        signals: List[Dict[str, Any]] = []
-        for feed_url in feeds:
+        for url in self.urls:
             try:
-                xml = await fetch_text(self.session, feed_url)
-                parsed = feedparser.parse(xml)
+                content = await fetch_text(self.session, url)
+                feed = feedparser.parse(content)
 
-                for entry in parsed.entries:
-                    published_dt: dt.datetime | None = None
-                    tm = getattr(entry, "published_parsed", None)
-                    if tm:
-                        try:
-                            published_dt = dt.datetime(*tm[:6])
-                        except Exception:
-                            published_dt = None
-
-                    if published_dt and published_dt <= since:
+                for e in feed.entries:
+                    published = getattr(e, "published_parsed", None) or getattr(e, "updated_parsed", None)
+                    ts = datetime.now(timezone.utc).timestamp()
+                    if published:
+                        ts = datetime(*published[:6], tzinfo=timezone.utc).timestamp()
+                    if ts < since_ts:
                         continue
-
-                    title = getattr(entry, "title", "") or ""
-                    summary = getattr(entry, "summary", "") or ""
-                    url = getattr(entry, "link", "") or ""
-
-                    signals.append(
+                    out.append(
                         {
                             "source": "ecosystem",
-                            "type": "ecosystem_announcement",
-                            "title": title,
-                            "description": summary,
-                            "url": url,
-                            "timestamp": (published_dt or dt.datetime.utcnow()).isoformat(),
-                            "source_name": getattr(parsed.feed, "title", "ecosystem"),
-                            "raw_json": "{}",
+                            "title": getattr(e, "title", "") or "",
+                            "url": getattr(e, "link", "") or "",
+                            "summary": getattr(e, "summary", "") or "",
+                            "created_at": datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(),
+                            "raw": {"feed_url": url},
                         }
                     )
 
-            except Exception as e:
-                # Non-fatal: warn and continue other feeds.
-                logger.warning("EcosystemIngester failed for %s: %s", feed_url, e)
+                ok += 1
+            except Exception as ex:
+                fail += 1
+                exc_types[type(ex).__name__] = exc_types.get(type(ex).__name__, 0) + 1
+                msg = str(ex)
+                if "403" in msg or "Forbidden" in msg or "cloudflare" in msg.lower():
+                    logger.warning("EcosystemIngester blocked for %s: %s", url, ex)
+                else:
+                    logger.warning("EcosystemIngester failed for %s: %s", url, ex)
 
-        return signals
+        logger.info(
+            "EcosystemIngester: sources=%d ok=%d fail=%d items=%d top_exceptions=%s",
+            attempted, ok, fail, len(out),
+            dict(sorted(exc_types.items(), key=lambda kv: kv[1], reverse=True)[:3]),
+        )
+        return out
