@@ -10,7 +10,8 @@ def escape_md(text: str) -> str:
 def format_signal(s: Dict[str, Any]) -> str:
     title = escape_md(s.get("title","(no title)"))
     url = s.get("url","")
-    score = s.get("signal_score", 0.0)
+    # Numbers like 0.82 contain '.' which is reserved in MarkdownV2.
+    score = escape_md(str(s.get("signal_score", 0.0)))
     chain = escape_md(s.get("chain","unknown"))
     sector = escape_md(s.get("sector","unknown"))
     short = escape_md((s.get("description","") or "")[:140].replace("\n"," "))
@@ -31,7 +32,11 @@ def format_dailybrief(payload: Dict[str, Any]) -> str:
     parts = []
     parts.append(f"*Daily Brief — {escape_md(payload.get('date',''))}*")
     mt = payload.get("analysis", {}).get("market_tone", {})
-    parts.append(f"_Market tone:_ *{escape_md(mt.get('market_tone','neutral'))}* (conf {mt.get('confidence',0)})")
+    # Parentheses and '.' must be escaped in MarkdownV2.
+    conf = escape_md(str(mt.get("confidence", 0)))
+    parts.append(
+        f"_Market tone:_ *{escape_md(mt.get('market_tone','neutral'))}* \\(conf {conf}\\)"
+    )
     parts.append("")
     for header, signals in payload.get("sections", {}).items():
         parts.append(format_section(header, signals))

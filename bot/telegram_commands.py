@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional
 from telegram import Update
 from telegram.ext import ContextTypes
 
-from bot.formatter import format_section, format_dailybrief
+from bot.formatter import format_section, format_dailybrief, escape_md
 from storage.sqlite_store import SQLiteStore
 from engine.pipeline import run_pipeline
 
@@ -49,13 +49,19 @@ async def cmd_trends(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     analysis = payload.get("analysis", {})
     lines = ["*Trends & Market Tone*"]
     mt = analysis.get("market_tone", {})
-    lines.append(f"_Tone:_ *{mt.get('market_tone','neutral')}* (conf {mt.get('confidence',0)})")
+    tone = escape_md(str(mt.get("market_tone", "neutral")))
+    conf = escape_md(str(mt.get("confidence", 0)))
+    lines.append(f"_Tone:_ *{tone}* \\(conf {conf}\\)")
     lines.append("")
     narr = analysis.get("narratives") or []
     if narr:
         lines.append("*Narrative clusters*")
         for n in narr[:6]:
-            lines.append(f"- {n.get('chain','unknown')}/{n.get('sector','unknown')}: {n.get('count',0)}")
+            chain = escape_md(str(n.get("chain", "unknown")))
+            sector = escape_md(str(n.get("sector", "unknown")))
+            count = escape_md(str(n.get("count", 0)))
+            # '-' must be escaped in MarkdownV2
+            lines.append(f"\\- {chain}/{sector}: {count}")
     else:
         lines.append("_No narratives computed._")
     await update.message.reply_text("\n".join(lines), parse_mode="MarkdownV2", disable_web_page_preview=True)
