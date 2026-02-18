@@ -1,0 +1,163 @@
+############################################
+# OS / Editor / IDE
+############################################
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+.vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+.idea/
+*.iml
+*.ipr
+*.iws
+
+*.swp
+*.swo
+*~
+*.bak
+*.tmp
+
+############################################
+# Logs
+############################################
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+debug.log
+
+############################################
+# Environment / Secrets (IMPORTANT)
+############################################
+.env
+.env.*
+!.env.example
+*.env.local
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.jks
+*.keystore
+secrets/
+**/secrets/
+credentials.json
+service-account*.json
+google-credentials*.json
+*.sqlite
+*.sqlite3
+
+############################################
+# Python
+############################################
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+.python-version
+
+# Build / distribution
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Testing / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.pyre/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+############################################
+# Node / JS / TS
+############################################
+node_modules/
+npm-cache/
+.pnpm-store/
+.yarn/
+.yarn-cache/
+.pnp.*
+.npmrc
+
+# Frontend builds
+.next/
+out/
+.nuxt/
+dist/
+build/
+.cache/
+.parcel-cache/
+.svelte-kit/
+
+############################################
+# Docker
+############################################
+**/.docker/
+docker-data/
+*.pid
+
+############################################
+# Terraform / IaC (if you use it)
+############################################
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+*.tfvars
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+############################################
+# Cloud / GCP / AWS / Misc
+############################################
+gcloud/
+.gsutil/
+.boto
+.aws/
+aws-credentials*
+*.orig
+
+############################################
+# Local data / downloads
+############################################
+data/
+datasets/
+downloads/
+tmp/
+.cache/
+
+############################################
+# Keep these examples if you want tracked
+############################################
+!.gitignore
+!.env.example
