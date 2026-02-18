@@ -1,0 +1,32 @@
+bot:
+  name: "Web3 Intelligence Bot"
+  version: "1.0.0"
+  timezone: "Africa/Lagos"
+
+scheduler:
+  run_interval_hours: 24
+  max_retries: 5
+
+rate_limits:
+  request_timeout_seconds: 15
+
+filtering:
+  news:
+    exclude_keywords: ["giveaway","airdrop","free tokens","pump","moon"]
+  github:
+    min_stars: 5
+    max_repo_age_days: 365
+    activity_window_days: 30
+
+analysis:
+  top_signals_to_analyze: 10
+
+storage:
+  database_path: "./data/web3_intelligence.db"
+  rolling_window_hours: 24
+  max_signals_retained_days: 30
+
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file_path: "./logs/web3_intelligence.log"

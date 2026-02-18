@@ -1,0 +1,157 @@
+{
+  "chains": {
+    "ethereum_l2s": {
+      "priority": "high",
+      "multiplier": 1.3,
+      "keywords": [
+        "l2",
+        "layer 2",
+        "arbitrum",
+        "optimism",
+        "base",
+        "zksync",
+        "starknet",
+        "scroll",
+        "linea",
+        "rollup",
+        "zk"
+      ]
+    },
+    "solana": {
+      "priority": "high",
+      "multiplier": 1.2,
+      "keywords": [
+        "solana",
+        "svm",
+        "sol",
+        "jito",
+        "marinade"
+      ]
+    },
+    "bitcoin_l2s": {
+      "priority": "high",
+      "multiplier": 1.2,
+      "keywords": [
+        "bitcoin l2",
+        "btcfi",
+        "stacks",
+        "rootstock",
+        "merlin",
+        "citrea",
+        "bob",
+        "bitvm",
+        "ordinals"
+      ]
+    }
+  },
+  "sectors": {
+    "defi": {
+      "priority": "high",
+      "multiplier": 1.4,
+      "keywords": [
+        "defi",
+        "dex",
+        "amm",
+        "lending",
+        "borrow",
+        "perps",
+        "derivatives",
+        "liquidity",
+        "yield",
+        "stablecoin",
+        "bridge",
+        "restaking",
+        "lst",
+        "lrt"
+      ]
+    },
+    "infrastructure": {
+      "priority": "high",
+      "multiplier": 1.3,
+      "keywords": [
+        "rpc",
+        "indexer",
+        "oracle",
+        "bridge",
+        "cross-chain",
+        "wallet",
+        "sdk",
+        "api",
+        "account abstraction",
+        "rollup stack",
+        "sequencer"
+      ]
+    },
+    "ai_crypto": {
+      "priority": "medium",
+      "multiplier": 1.1,
+      "keywords": [
+        "ai",
+        "agent",
+        "inference",
+        "training",
+        "gpu",
+        "compute",
+        "deai",
+        "llm",
+        "model",
+        "autonomous"
+      ]
+    },
+    "rwa": {
+      "priority": "medium",
+      "multiplier": 1.1,
+      "keywords": [
+        "rwa",
+        "real world assets",
+        "treasury",
+        "bond",
+        "t-bill",
+        "tokenization",
+        "credit"
+      ]
+    },
+    "restaking": {
+      "priority": "medium",
+      "multiplier": 1.1,
+      "keywords": [
+        "restaking",
+        "eigenlayer",
+        "avs",
+        "lrt",
+        "liquid restaking"
+      ]
+    },
+    "gaming": {
+      "priority": "low",
+      "multiplier": 1.0,
+      "keywords": [
+        "gaming",
+        "gamefi",
+        "web3 game",
+        "play-to-earn"
+      ]
+    },
+    "nft": {
+      "priority": "low",
+      "multiplier": 0.9,
+      "keywords": [
+        "nft",
+        "collectible",
+        "marketplace"
+      ]
+    }
+  },
+  "spam_patterns": [
+    "\ud83d\ude80\ud83d\ude80\ud83d\ude80",
+    "MOON",
+    "100x",
+    "1000x",
+    "FREE AIRDROP",
+    "CLAIM NOW",
+    "DM for alpha",
+    "guaranteed returns",
+    "no risk",
+    "finite offer"
+  ]
+}
