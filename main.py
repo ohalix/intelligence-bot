@@ -16,6 +16,7 @@ from bot.telegram_commands import (
     cmd_news,
     cmd_newprojects,
     cmd_rawsignals,
+    cmd_sources,
     cmd_trends,
 )
 from bot.scheduler import start_scheduler
@@ -104,6 +105,7 @@ def main():
     app.add_handler(CommandHandler("funding", cmd_funding))
     app.add_handler(CommandHandler("github", cmd_github))
     app.add_handler(CommandHandler("rawsignals", cmd_rawsignals))
+    app.add_handler(CommandHandler("sources", cmd_sources))
 
     logger.info("Bot started (long polling).")
     # IMPORTANT: run_polling is a blocking call that manages the asyncio loop internally.
