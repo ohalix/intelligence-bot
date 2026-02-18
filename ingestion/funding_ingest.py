@@ -29,9 +29,14 @@ class FundingIngester:
         out: List[Dict[str, Any]] = []
         for url in sources:
             try:
-                resp = await self.session.get(url)
-                resp.raise_for_status()
-                feed = feedparser.parse(resp.text)
+                async with self.session.get(url) as resp:
+                    if resp.status >= 400:
+                        raise RuntimeError(f"HTTP {resp.status}")
+                    # aiohttp: text() is an async method. Passing the bound
+                    # method (resp.text) into feedparser causes
+                    # "'function' object has no attribute 'encode'".
+                    text = await resp.text()
+                feed = feedparser.parse(text)
 
                 for entry in feed.entries:
                     published_dt = _parse_entry_datetime(entry) or dt.datetime.utcnow()

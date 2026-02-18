@@ -37,15 +37,16 @@ class GitHubIngester:
         since_dt = max(since, min_since)
         q_since = since_dt.date().isoformat()
 
-        headers = {"Accept": "application/vnd.github+json"}
+        headers = {"Accept": "application/vnd.github+json", "User-Agent": "Mozilla/5.0"}
 
         out: List[Dict[str, Any]] = []
         for q in queries:
             try:
                 params = {"q": f"{q} pushed:>={q_since}", "sort": "updated", "order": "desc", "per_page": 10}
-                resp = await self.session.get(self.BASE, params=params, headers=headers)
-                resp.raise_for_status()
-                data = resp.json()
+                async with self.session.get(self.BASE, params=params, headers=headers) as resp:
+                    if resp.status >= 400:
+                        raise RuntimeError(f"GitHub API HTTP {resp.status}")
+                    data = await resp.json()
 
                 for item in data.get("items", [])[:10]:
                     url = item.get("html_url")
