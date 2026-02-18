@@ -7,6 +7,20 @@ def escape_md(text: str) -> str:
         return ""
     return re.sub(r'([_\*\[\]()~`>#+\-=|{}.!])', r'\\\1', str(text))
 
+
+def escape_md_url(url: str) -> str:
+    """Escape only what Telegram MarkdownV2 requires inside link URLs.
+
+    For MarkdownV2 links, the URL part has different escaping rules than normal
+    text. In practice, an unescaped ')' in a URL often breaks parsing and then
+    Telegram reports a seemingly unrelated reserved-character error.
+    """
+    if url is None:
+        return ""
+    u = str(url)
+    # Escape backslashes first, then closing parens.
+    return u.replace("\\", "\\\\").replace(")", "\\)")
+
 def format_signal(s: Dict[str, Any]) -> str:
     title = escape_md(s.get("title","(no title)"))
     url = s.get("url","")
@@ -15,7 +29,7 @@ def format_signal(s: Dict[str, Any]) -> str:
     chain = escape_md(s.get("chain","unknown"))
     sector = escape_md(s.get("sector","unknown"))
     short = escape_md((s.get("description","") or "")[:140].replace("\n"," "))
-    link = f"[link]({escape_md(url)})" if url else ""
+    link = f"[link]({escape_md_url(url)})" if url else ""
     return f"*{title}*\n_{chain} · {sector}_  |  score: *{score}*\n{short}\n{link}"
 
 def format_section(header: str, signals: List[Dict[str, Any]]) -> str:
