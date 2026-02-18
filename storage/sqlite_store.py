@@ -1,8 +1,58 @@
 import json
 import os
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Dict, List, Optional
+
+
+def _normalize_ts(value: Any) -> str:
+    """Normalize timestamps to a UTC-naive ISO string.
+
+    We compare timestamps in SQLite using string comparisons. Mixed formats
+    (RFC822 dates, timezone offsets, trailing 'Z') can cause silent misses in
+    rolling-window queries. Normalizing on write and query is low-risk and
+    prevents "ingested but not visible" regressions.
+    """
+    if value is None:
+        return datetime.utcnow().isoformat()
+
+    if isinstance(value, datetime):
+        dt = value
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt.isoformat()
+
+    if isinstance(value, (int, float)):
+        try:
+            dt = datetime.fromtimestamp(float(value), tz=timezone.utc).replace(tzinfo=None)
+            return dt.isoformat()
+        except Exception:
+            return datetime.utcnow().isoformat()
+
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return datetime.utcnow().isoformat()
+        # ISO8601 w/ optional trailing Z
+        try:
+            iso = s.replace("Z", "+00:00") if s.endswith("Z") else s
+            dt = datetime.fromisoformat(iso)
+            if dt.tzinfo is not None:
+                dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+            return dt.isoformat()
+        except Exception:
+            pass
+        # RSS/HTTP-date (RFC822)
+        try:
+            dt = parsedate_to_datetime(s)
+            if dt.tzinfo is not None:
+                dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+            return dt.isoformat()
+        except Exception:
+            return datetime.utcnow().isoformat()
+
+    return datetime.utcnow().isoformat()
 
 
 class SQLiteStore:
@@ -136,14 +186,8 @@ class SQLiteStore:
                     # Skip malformed items.
                     continue
 
-                # Normalize timestamp to ISO string.
-                ts = s.get("timestamp")
-                if isinstance(ts, datetime):
-                    ts_str = ts.isoformat()
-                elif isinstance(ts, str):
-                    ts_str = ts
-                else:
-                    ts_str = datetime.utcnow().isoformat()
+                # Normalize timestamp to a stable ISO format for reliable window queries.
+                ts_str = _normalize_ts(s.get("timestamp"))
 
                 raw_json = s.get("raw_json")
                 if raw_json is None:
@@ -198,7 +242,7 @@ class SQLiteStore:
         limit: int = 10,
     ) -> List[Dict[str, Any]]:
         """Fetch signals newer than since_ts. If source is None, return all."""
-        since_iso = since_ts.isoformat() if isinstance(since_ts, datetime) else str(since_ts)
+        since_iso = _normalize_ts(since_ts)
 
         q = (
             "SELECT dedup_key, source, type, title, description, url, timestamp, "
@@ -230,7 +274,7 @@ class SQLiteStore:
 
     def clear_old_signals(self, older_than: datetime) -> int:
         """Best-effort cleanup to keep DB small."""
-        older_iso = older_than.isoformat() if isinstance(older_than, datetime) else str(older_than)
+        older_iso = _normalize_ts(older_than)
         with self._conn() as conn:
             cur = conn.execute("DELETE FROM signals WHERE timestamp < ?", (older_iso,))
             conn.commit()
