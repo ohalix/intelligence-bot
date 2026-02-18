@@ -1,4 +1,5 @@
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
 
@@ -6,7 +7,7 @@ from telegram import Update
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
-from bot.formatter import format_section, format_dailybrief, escape_md
+from bot.formatter import format_section, format_dailybrief, escape_html
 from storage.sqlite_store import SQLiteStore
 from engine.pipeline import run_pipeline
 
@@ -20,28 +21,28 @@ except ImportError:  # pragma: no cover
 logger = logging.getLogger(__name__)
 
 
-async def _safe_reply(update: Update, text: str, *, markdown: bool = True) -> None:
+async def _safe_reply(update: Update, text_html: str) -> None:
     """Send a message without crashing the handler.
 
-    We default to MarkdownV2 for formatting, but Telegram will hard-fail the
-    request if any reserved character escapes were missed. In that case we
-    retry once as plain text to guarantee command stability.
+    Primary: Telegram HTML parse mode.
+    Fallback: plain text (no parse_mode) to guarantee command stability.
     """
     if not update.message:
         return
     try:
         await update.message.reply_text(
-            text,
-            parse_mode="MarkdownV2" if markdown else None,
+            text_html,
+            parse_mode="HTML",
             disable_web_page_preview=True,
         )
     except BadRequest as e:
         logger.exception(
-            "MarkdownV2 send failed; retrying as plain text. err=%s preview=%r",
+            "HTML send failed; retrying as plain text. err=%s preview=%r",
             e,
-            text[:200],
+            (text_html or "")[:200],
         )
-        await update.message.reply_text(text, parse_mode=None, disable_web_page_preview=True)
+        plain = re.sub(r"<[^>]+>", "", text_html or "")
+        await update.message.reply_text(plain, parse_mode=None, disable_web_page_preview=True)
 
 def _since(config: Dict[str, Any]) -> datetime:
     hours = int(config.get("storage", {}).get("rolling_window_hours", 24))
@@ -53,12 +54,12 @@ async def cmd_dailybrief(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # run a manual pipeline (override)
     await run_pipeline(cfg, store, manual=True)
     payload = build_daily_payload(cfg, store)
-    await _safe_reply(update, format_dailybrief(payload), markdown=True)
+    await _safe_reply(update, format_dailybrief(payload))
 
 async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     cfg = context.bot_data["config"]; store: SQLiteStore = context.bot_data["store"]
     signals = store.get_signals_since(_since(cfg), source="news", limit=cfg["analysis"]["top_signals_to_analyze"])
-    await _safe_reply(update, format_section("News", signals), markdown=True)
+    await _safe_reply(update, format_section("News", signals))
 
 async def cmd_newprojects(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     cfg = context.bot_data["config"]; store: SQLiteStore = context.bot_data["store"]
@@ -66,45 +67,44 @@ async def cmd_newprojects(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     tw = store.get_signals_since(_since(cfg), source="twitter", limit=10)
     gh = store.get_signals_since(_since(cfg), source="github", limit=10)
     combined = (tw + gh)[:cfg["analysis"]["top_signals_to_analyze"]]
-    await _safe_reply(update, format_section("New Projects", combined), markdown=True)
+    await _safe_reply(update, format_section("New Projects", combined))
 
 async def cmd_trends(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     cfg = context.bot_data["config"]; store: SQLiteStore = context.bot_data["store"]
     payload = build_daily_payload(cfg, store, include_sections=False)
     analysis = payload.get("analysis", {})
-    lines = ["*Trends & Market Tone*"]
+    lines = ["<b>Trends &amp; Market Tone</b>"]
     mt = analysis.get("market_tone", {})
-    tone = escape_md(str(mt.get("market_tone", "neutral")))
-    conf = escape_md(str(mt.get("confidence", 0)))
-    lines.append(f"_Tone:_ *{tone}* \\(conf {conf}\\)")
+    tone = escape_html(str(mt.get("market_tone", "neutral")))
+    conf = escape_html(str(mt.get("confidence", 0)))
+    lines.append(f"Tone: <b>{tone}</b> <i>(conf {conf})</i>")
     lines.append("")
     narr = analysis.get("narratives") or []
     if narr:
-        lines.append("*Narrative clusters*")
+        lines.append("<b>Narrative clusters</b>")
         for n in narr[:6]:
-            chain = escape_md(str(n.get("chain", "unknown")))
-            sector = escape_md(str(n.get("sector", "unknown")))
-            count = escape_md(str(n.get("count", 0)))
-            # '-' must be escaped in MarkdownV2
-            lines.append(f"\\- {chain}/{sector}: {count}")
+            chain = escape_html(str(n.get("chain", "unknown")))
+            sector = escape_html(str(n.get("sector", "unknown")))
+            count = escape_html(str(n.get("count", 0)))
+            lines.append(f"• {chain}/{sector}: <b>{count}</b>")
     else:
-        lines.append("_No narratives computed._")
-    await _safe_reply(update, "\n".join(lines), markdown=True)
+        lines.append("<i>No narratives computed.</i>")
+    await _safe_reply(update, "\n".join(lines))
 
 async def cmd_funding(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     cfg = context.bot_data["config"]; store: SQLiteStore = context.bot_data["store"]
     signals = store.get_signals_since(_since(cfg), source="funding", limit=cfg["analysis"]["top_signals_to_analyze"])
-    await _safe_reply(update, format_section("Funding", signals), markdown=True)
+    await _safe_reply(update, format_section("Funding", signals))
 
 async def cmd_github(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     cfg = context.bot_data["config"]; store: SQLiteStore = context.bot_data["store"]
     signals = store.get_signals_since(_since(cfg), source="github", limit=cfg["analysis"]["top_signals_to_analyze"])
-    await _safe_reply(update, format_section("GitHub", signals), markdown=True)
+    await _safe_reply(update, format_section("GitHub", signals))
 
 async def cmd_rawsignals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     cfg = context.bot_data["config"]; store: SQLiteStore = context.bot_data["store"]
     signals = store.get_signals_since(_since(cfg), source=None, limit=cfg["analysis"]["top_signals_to_analyze"])
-    await _safe_reply(update, format_section("Raw Signals", signals), markdown=True)
+    await _safe_reply(update, format_section("Raw Signals", signals))
 
 
 # Explicit exports to make `from bot.telegram_commands import cmd_*` robust.
