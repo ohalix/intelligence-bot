@@ -1,75 +1,86 @@
+import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
-
-from utils.http import fetch_json
+from datetime import datetime, timedelta
+from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
 
-GITHUB_SEARCH_API = "https://api.github.com/search/repositories"
+
+DEFAULT_QUERIES = [
+    "language:Solidity stars:>50 pushed:>2024-01-01",
+    "topic:defi stars:>50 pushed:>2024-01-01",
+]
+
 
 class GitHubIngester:
     def __init__(self, config: Dict[str, Any], session):
         self.config = config
         self.session = session
-        ing = (config or {}).get("ingestion", {})
-        self.topics: List[str] = ing.get("github_topics") or config.get("github_topics", []) or []
-        self.token: Optional[str] = (config or {}).get("keys", {}).get("github_token")
-
-    def _headers(self) -> Dict[str, str]:
-        h = {"Accept": "application/vnd.github+json"}
-        if self.token:
-            h["Authorization"] = f"Bearer {self.token}"
-        return h
+        self.token = config.get("github", {}).get("token")
 
     async def ingest(self, since: datetime) -> List[Dict[str, Any]]:
-        # GitHub search requires date granularity; keep a small rolling window
-        window_days = int((self.config or {}).get("analysis", {}).get("github_window_days", 7))
-        q_since = max(since.astimezone(timezone.utc), datetime.now(timezone.utc) - timedelta(days=window_days)).date().isoformat()
+        window_days = int(self.config.get("github", {}).get("window_days", 7))
+        q_since = max(since, datetime.utcnow() - timedelta(days=window_days)).date().isoformat()
 
-        attempted = len(self.topics) if self.topics else 1
-        ok = 0
-        fail = 0
-        exc_types: Dict[str, int] = {}
-        out: List[Dict[str, Any]] = []
+        queries = self.config.get("github", {}).get("queries") or DEFAULT_QUERIES
+        concurrency = int(self.config.get("github", {}).get("concurrency", 3))
+        sem = asyncio.Semaphore(concurrency)
 
-        topics = self.topics or ["web3"]
-        for topic in topics:
-            q = f"topic:{topic} pushed:>={q_since}"
-            params = {"q": q, "sort": "updated", "order": "desc", "per_page": 20}
-            try:
-                data = await fetch_json(self.session, GITHUB_SEARCH_API, headers=self._headers(), params=params)
-                items = data.get("items", []) if isinstance(data, dict) else []
-                for it in items:
-                    updated_at = it.get("updated_at") or it.get("pushed_at") or it.get("created_at")
-                    # Filter in Python for precision
-                    ts = datetime.now(timezone.utc)
-                    if updated_at:
-                        try:
-                            ts = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
-                        except Exception:
-                            ts = datetime.now(timezone.utc)
-                    if ts < since.astimezone(timezone.utc):
-                        continue
-                    out.append(
-                        {
-                            "source": "github",
-                            "title": it.get("full_name", ""),
-                            "url": it.get("html_url", ""),
-                            "summary": it.get("description", "") or "",
-                            "created_at": ts.astimezone(timezone.utc).isoformat(),
-                            "raw": {"topic": topic, "stars": it.get("stargazers_count"), "language": it.get("language")},
-                        }
-                    )
-                ok += 1
-            except Exception as ex:
-                fail += 1
-                exc_types[type(ex).__name__] = exc_types.get(type(ex).__name__, 0) + 1
-                logger.warning("GitHubIngester failed for topic=%s: %s", topic, ex)
+        stats = {"attempted": 0, "success": 0, "fail": 0, "items": 0, "errors": {}}
+
+        async def _one(q: str) -> List[Dict[str, Any]]:
+            async with sem:
+                stats["attempted"] += 1
+                try:
+                    headers = {"Accept": "application/vnd.github+json"}
+                    if self.token:
+                        headers["Authorization"] = f"Bearer {self.token}"
+
+                    url = "https://api.github.com/search/repositories"
+                    params = {"q": f"{q} pushed:>={q_since}", "sort": "updated", "order": "desc"}
+
+                    async with self.session.get(url, params=params, headers=headers) as resp:
+                        resp.raise_for_status()
+                        data = await resp.json()  # aiohttp: must await
+
+                    items = data.get("items", []) if isinstance(data, dict) else []
+                    out: List[Dict[str, Any]] = []
+                    for repo in items:
+                        out.append(
+                            {
+                                "source": "github",
+                                "source_id": q,
+                                "title": repo.get("full_name", ""),
+                                "url": repo.get("html_url", ""),
+                                "description": repo.get("description", "") or "",
+                                "published_at": repo.get("pushed_at", ""),
+                            }
+                        )
+
+                    stats["success"] += 1
+                    stats["items"] += len(out)
+                    return out
+                except Exception as e:
+                    stats["fail"] += 1
+                    key = type(e).__name__
+                    stats["errors"][key] = stats["errors"].get(key, 0) + 1
+                    logger.warning("GitHubIngester failed for query=%r: %s", q, e)
+                    return []
+
+        results = await asyncio.gather(*[_one(q) for q in queries])
+        flattened = [x for sub in results for x in sub]
 
         logger.info(
-            "GitHubIngester: topics=%d ok=%d fail=%d items=%d top_exceptions=%s",
-            attempted, ok, fail, len(out),
-            dict(sorted(exc_types.items(), key=lambda kv: kv[1], reverse=True)[:3]),
+            "GitHubIngester run: attempted=%s success=%s fail=%s items=%s top_errors=%s",
+            stats["attempted"],
+            stats["success"],
+            stats["fail"],
+            stats["items"],
+            dict(sorted(stats["errors"].items(), key=lambda kv: kv[1], reverse=True)[:3]),
         )
-        return out
+
+        return flattened
+
+
+# Backwards-compatible alias (older code used GithubIngester)
+GithubIngester = GitHubIngester
