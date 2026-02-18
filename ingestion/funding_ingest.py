@@ -1,70 +1,91 @@
-import logging
 import datetime as dt
+import hashlib
+import logging
 from typing import Any, Dict, List
 
 import feedparser
 
-from .base_ingest import BaseIngester
-from utils.http import fetch_text
-
 logger = logging.getLogger(__name__)
 
-DEFAULT_FUNDING_FEEDS = [
-    "https://blockworks.co/feed",
-    "https://www.coindesk.com/arc/outboundfeeds/rss/",
-]
 
-FUNDING_KEYWORDS = [
-    "raised",
-    "funding",
-    "seed",
-    "series",
-    "investment",
-    "grant",
-    "backed",
-    "round",
-    "strategic",
-    "token sale",
-]
+class FundingIngester:
+    """Funding-related signals via RSS feeds."""
 
+    def __init__(self, config: Dict[str, Any], session):
+        self.config = config
+        self.session = session
 
-class FundingIngester(BaseIngester):
+    def _sources(self) -> List[str]:
+        ingestion_cfg = self.config.get("ingestion", {})
+        if "funding_sources" in ingestion_cfg:
+            return list(ingestion_cfg.get("funding_sources") or [])
+        return list(self.config.get("funding_sources") or [])
+
     async def ingest(self, since: dt.datetime) -> List[Dict[str, Any]]:
-        feeds = self.config.get("ingestion", {}).get("funding_sources") or DEFAULT_FUNDING_FEEDS
-        signals: List[Dict[str, Any]] = []
+        sources = self._sources()
+        if not sources:
+            return []
 
-        for feed_url in feeds:
+        out: List[Dict[str, Any]] = []
+        for url in sources:
             try:
-                xml = await fetch_text(self.session, feed_url)
-                parsed = feedparser.parse(xml)
+                resp = await self.session.get(url)
+                resp.raise_for_status()
+                feed = feedparser.parse(resp.text)
 
-                for entry in parsed.entries:
-                    published_dt: dt.datetime | None = None
-                    if getattr(entry, "published_parsed", None):
-                        published_dt = dt.datetime(*entry.published_parsed[:6])
-
-                    if published_dt and published_dt <= since:
+                for entry in feed.entries:
+                    published_dt = _parse_entry_datetime(entry) or dt.datetime.utcnow()
+                    if published_dt < since:
                         continue
 
-                    title = getattr(entry, "title", "") or ""
-                    summary = getattr(entry, "summary", "") or ""
-                    blob = f"{title} {summary}".lower()
-
-                    if not any(k in blob for k in FUNDING_KEYWORDS):
+                    title = (entry.get("title") or "").strip()
+                    link = (entry.get("link") or "").strip()
+                    summary = (entry.get("summary") or entry.get("description") or "").strip()
+                    if not title or not link:
                         continue
 
-                    signals.append(
+                    # crude filter to keep this feed about funding/ecosystem
+                    text = f"{title} {summary}".lower()
+                    if not any(k in text for k in ("raise", "raised", "funding", "seed", "series", "round", "grant")):
+                        continue
+
+                    dedup_key = hashlib.sha256(link.encode("utf-8")).hexdigest()
+
+                    out.append(
                         {
+                            "dedup_key": dedup_key,
                             "source": "funding",
-                            "type": "funding_announcement",
+                            "type": "funding",
                             "title": title,
                             "description": summary,
-                            "url": getattr(entry, "link", "") or "",
-                            "timestamp": published_dt or dt.datetime.utcnow(),
-                            "source_name": getattr(parsed.feed, "title", "funding"),
+                            "url": link,
+                            "timestamp": published_dt.isoformat(),
+                            "raw_json": "{}",
                         }
                     )
-            except Exception as e:
-                logger.warning(f"FundingIngester failed for {feed_url}: {e}")
 
-        return signals
+            except Exception as e:
+                logger.warning("FundingIngester failed for %s: %s", url, e)
+
+        return out
+
+
+def _parse_entry_datetime(entry: Any) -> dt.datetime | None:
+    for key in ("published_parsed", "updated_parsed"):
+        if key in entry and entry.get(key):
+            try:
+                tm = entry.get(key)
+                return dt.datetime(*tm[:6])
+            except Exception:
+                pass
+
+    for key in ("published", "updated"):
+        v = entry.get(key)
+        if not v:
+            continue
+        try:
+            return dt.datetime.fromisoformat(v.replace("Z", "+00:00")).replace(tzinfo=None)
+        except Exception:
+            continue
+
+    return None

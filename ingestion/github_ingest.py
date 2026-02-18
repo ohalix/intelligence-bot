@@ -1,82 +1,80 @@
-import logging
 import datetime as dt
+import hashlib
+import logging
 from typing import Any, Dict, List
-
-from .base_ingest import BaseIngester
-from utils.http import fetch_json
 
 logger = logging.getLogger(__name__)
 
 
-class GitHubIngester(BaseIngester):
+class GitHubIngester:
+    """GitHub public search-based ingestion (no auth required).
+
+    Uses the GitHub REST Search API which is rate-limited but usable for low-frequency runs.
+    """
+
+    BASE = "https://api.github.com/search/repositories"
+
+    def __init__(self, config: Dict[str, Any], session):
+        self.config = config
+        self.session = session
+
+    def _queries(self) -> List[str]:
+        ingestion_cfg = self.config.get("ingestion", {})
+        qs = ingestion_cfg.get("github_queries")
+        if qs is None:
+            qs = self.config.get("github_queries")
+        if isinstance(qs, str):
+            return [q.strip() for q in qs.split(",") if q.strip()]
+        return list(qs or [])
+
     async def ingest(self, since: dt.datetime) -> List[Dict[str, Any]]:
-        token = self.config.get("keys", {}).get("github_token")
-        headers = {"Accept": "application/vnd.github+json"}
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-
-        window_days = int(
-            self.config.get("filtering", {})
-            .get("github", {})
-            .get("activity_window_days", 30)
-        )
-        q_since = max(since, dt.datetime.utcnow() - dt.timedelta(days=window_days)).date().isoformat()
-
-        min_stars = int(self.config.get("filtering", {}).get("github", {}).get("min_stars", 5))
-        query = f"pushed:>={q_since} stars:>={min_stars}"
-        url = "https://api.github.com/search/repositories"
-        params = {"q": query, "sort": "updated", "order": "desc", "per_page": 30}
-
-        try:
-            data = await fetch_json(self.session, url, headers=headers, params=params)
-        except Exception as e:
-            logger.warning(f"GitHubIngester fetch failed: {e}")
+        queries = self._queries()
+        if not queries:
             return []
 
-        signals: List[Dict[str, Any]] = []
-        max_age = int(self.config.get("filtering", {}).get("github", {}).get("max_repo_age_days", 365))
+        window_days = int(self.config.get("ingestion", {}).get("github_window_days", 7))
+        min_since = dt.datetime.utcnow() - dt.timedelta(days=window_days)
+        since_dt = max(since, min_since)
+        q_since = since_dt.date().isoformat()
 
-        for item in (data.get("items") or [])[:50]:
-            pushed_at = item.get("pushed_at")
-            created_at = item.get("created_at")
+        headers = {"Accept": "application/vnd.github+json"}
 
-            # Parse timestamps safely without using a local variable named `datetime`.
+        out: List[Dict[str, Any]] = []
+        for q in queries:
             try:
-                ts = (
-                    dt.datetime.fromisoformat(pushed_at.replace("Z", "+00:00")).replace(tzinfo=None)
-                    if pushed_at
-                    else dt.datetime.utcnow()
-                )
-            except Exception:
-                ts = dt.datetime.utcnow()
+                params = {"q": f"{q} pushed:>={q_since}", "sort": "updated", "order": "desc", "per_page": 10}
+                resp = await self.session.get(self.BASE, params=params, headers=headers)
+                resp.raise_for_status()
+                data = resp.json()
 
-            if ts <= since:
-                continue
+                for item in data.get("items", [])[:10]:
+                    url = item.get("html_url")
+                    title = item.get("full_name")
+                    desc = (item.get("description") or "").strip()
+                    updated_at = item.get("pushed_at") or item.get("updated_at")
+                    try:
+                        ts = dt.datetime.fromisoformat(updated_at.replace("Z", "+00:00")).replace(tzinfo=None)
+                    except Exception:
+                        ts = dt.datetime.utcnow()
+                    if ts < since:
+                        continue
 
-            try:
-                created = (
-                    dt.datetime.fromisoformat(created_at.replace("Z", "+00:00")).replace(tzinfo=None)
-                    if created_at
-                    else None
-                )
-            except Exception:
-                created = None
+                    dedup_key = hashlib.sha256((url or title or "").encode("utf-8")).hexdigest()
 
-            if created and (dt.datetime.utcnow() - created).days > max_age:
-                continue
+                    out.append(
+                        {
+                            "dedup_key": dedup_key,
+                            "source": "github",
+                            "type": "github",
+                            "title": title or "",
+                            "description": desc,
+                            "url": url or "",
+                            "timestamp": ts.isoformat(),
+                            "raw_json": "{}",
+                        }
+                    )
 
-            signals.append(
-                {
-                    "source": "github",
-                    "type": "github_repo",
-                    "title": item.get("full_name") or item.get("name"),
-                    "description": item.get("description") or "",
-                    "url": item.get("html_url") or "",
-                    "timestamp": ts,
-                    "stars": item.get("stargazers_count", 0),
-                    "forks": item.get("forks_count", 0),
-                    "language": item.get("language") or "Unknown",
-                }
-            )
+            except Exception as e:
+                logger.error("GitHubIngester failed: %s", e, exc_info=True)
 
-        return signals
+        return out
