@@ -1,54 +1,93 @@
-"""processing.sentiment_analyzer
+"""Sentiment analysis utilities.
 
-Lightweight lexicon sentiment for offline and free-tier operation.
-Outputs:
-  sentiment: {score: float (-1..1), label: positive|neutral|negative}
+This project intentionally avoids paid/external sentiment APIs by default.
+We provide a lightweight, deterministic, local heuristic sentiment scorer.
+
+The pipeline expects SentimentAnalyzer.add_sentiment(signals) -> list.
+Older repo iterations may have implemented different method names; we keep
+compatibility by exposing add_sentiment as the public entrypoint.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from dataclasses import dataclass
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 
-POS_WORDS = {
-    "breakthrough", "upgrade", "launch", "mainnet", "partnership", "integration", "grant",
-    "funding", "raised", "growth", "record", "win", "improves", "improved", "expands"
+_POS_WORDS = {
+    "bull", "bullish", "pump", "pumped", "pumping", "up", "uptrend", "breakout", "ath",
+    "approve", "approved", "partnership", "launch", "released", "ship", "shipped",
+    "upgrade", "upgraded", "growth", "record", "surge", "rally", "green",
 }
-NEG_WORDS = {
-    "hack", "exploit", "down", "outage", "lawsuit", "ban", "rug", "scam",
-    "attack", "liquidation", "collapse", "insolvency", "drained"
+_NEG_WORDS = {
+    "bear", "bearish", "dump", "dumped", "down", "downtrend", "breakdown", "rekt",
+    "exploit", "hacked", "hack", "rug", "rugpull", "attack", "incident",
+    "lawsuit", "ban", "banned", "fraud", "scam", "warning", "red",
 }
+
+
+def _coalesce_text(signal: Dict[str, Any]) -> str:
+    # Prefer richer fields, but stay compatible with multiple schemas.
+    parts: List[str] = []
+    for k in ("title", "summary", "snippet", "text", "content", "description"):
+        v = signal.get(k)
+        if isinstance(v, str) and v.strip():
+            parts.append(v.strip())
+    return " \n".join(parts).strip()
+
+
+def _heuristic_score(text: str) -> Tuple[str, float]:
+    """Return (label, confidence). Confidence is 0..1."""
+    if not text:
+        return "neutral", 0.0
+
+    t = text.lower()
+    # Tokenize loosely
+    tokens = [tok.strip(".,:;!?()[]{}\"'`).") for tok in t.split()]
+    pos = sum(1 for tok in tokens if tok in _POS_WORDS)
+    neg = sum(1 for tok in tokens if tok in _NEG_WORDS)
+
+    if pos == 0 and neg == 0:
+        return "neutral", 0.0
+
+    # Simple normalized difference
+    total = pos + neg
+    diff = pos - neg
+    # confidence increases with both magnitude and evidence count
+    conf = min(1.0, abs(diff) / max(1, total))
+    if diff > 0:
+        return "positive", conf
+    if diff < 0:
+        return "negative", conf
+    return "neutral", conf
 
 
 class SentimentAnalyzer:
-    def __init__(self, config: Any = None):
+    """Attaches a lightweight sentiment estimate to signals.
+
+    Public API expected by pipeline:
+        add_sentiment(signals: list[dict]) -> list[dict]
+    """
+
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
         self.config = config or {}
 
-    def score(self, text: str) -> float:
-        t = (text or "").lower()
-        pos = sum(1 for w in POS_WORDS if w in t)
-        neg = sum(1 for w in NEG_WORDS if w in t)
-        if pos == 0 and neg == 0:
-            return 0.0
-        # normalized
-        return (pos - neg) / max(pos + neg, 1)
+    # ---- Compatibility entrypoint expected by engine/pipeline.py ----
+    def add_sentiment(self, signals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return [self._add_one(s) for s in (signals or [])]
 
-    def label(self, score: float) -> str:
-        if score >= 0.2:
-            return "positive"
-        if score <= -0.2:
-            return "negative"
-        return "neutral"
+    # ---- If other parts of the repo call different names, keep them too ----
+    def analyze(self, signals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return self.add_sentiment(signals)
 
-    def analyze(self, signal: Dict[str, Any]) -> Dict[str, Any]:
-        parts = []
-        for k in ("title", "text", "description"):
-            if signal.get(k):
-                parts.append(str(signal[k]))
-        text = " ".join(parts)
-        sc = float(self.score(text))
-        signal["sentiment"] = {"score": round(sc, 3), "label": self.label(sc)}
-        return signal
+    def _add_one(self, signal: Dict[str, Any]) -> Dict[str, Any]:
+        # Defensive copy to avoid surprising callers that reuse dicts.
+        s = dict(signal or {})
+        text = _coalesce_text(s)
+        label, confidence = _heuristic_score(text)
 
-    def analyze_batch(self, signals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        return [self.analyze(s) for s in signals]
+        # Standardized keys used by downstream formatting/analysis if present.
+        # Do not remove/rename existing keys.
+        s.setdefault("sentiment", label)
+        s.setdefault("sentiment_confidence", float(confidence))
+        return s
