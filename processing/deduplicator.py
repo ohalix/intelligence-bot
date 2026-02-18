@@ -3,31 +3,40 @@ from typing import Any, Dict, List, Set
 
 
 class Deduplicator:
-    """In-memory deduplication for a single run (SQLite store enforces 24h dedup across runs)."""
+    """Simple deterministic de-duplication for a rolling window.
 
-    def __init__(self, config: Any = None) -> None:
-        self.seen: Set[str] = set()
+    Public API expected by the pipeline:
+      - dedup(signals)
 
-    @staticmethod
-    def _hash(value: str) -> str:
-        return hashlib.sha256(value.encode("utf-8")).hexdigest()
+    Historically some versions used `deduplicate()`. We keep both names as
+    a compatibility shim (no behavior change).
+    """
 
-    def key(self, signal: Dict[str, Any]) -> str:
-        for k in ("tweet_id", "repo_id", "id", "url"):
-            v = signal.get(k)
-            if v:
-                return f"{signal.get('source','unknown')}:{self._hash(str(v))}"
-        # fallback: hash title/text
-        base = (signal.get("title") or "") + "|" + (signal.get("text") or "")
-        return f"{signal.get('source','unknown')}:{self._hash(base)}"
+    def __init__(self) -> None:
+        self._seen: Set[str] = set()
 
-    def deduplicate(self, signals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        out = []
-        for s in signals:
-            k = self.key(s)
-            s["dedup_key"] = k
-            if k in self.seen:
+    def _key(self, signal: Dict[str, Any]) -> str:
+        parts = [
+            str(signal.get("source", "")),
+            str(signal.get("type", "")),
+            str(signal.get("url", "")),
+            str(signal.get("title", "")),
+            str(signal.get("tweet_id", "")),
+            str(signal.get("repo_id", "")),
+        ]
+        raw = "|".join(parts).encode("utf-8", "ignore")
+        return hashlib.sha256(raw).hexdigest()
+
+    def dedup(self, signals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        for s in signals or []:
+            k = self._key(s)
+            if k in self._seen:
                 continue
-            self.seen.add(k)
+            self._seen.add(k)
             out.append(s)
         return out
+
+    # Backwards-compatible alias
+    def deduplicate(self, signals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return self.dedup(signals)
