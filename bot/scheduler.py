@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from datetime import datetime
 from typing import Any, Dict
@@ -10,9 +11,20 @@ from storage.sqlite_store import SQLiteStore
 
 logger = logging.getLogger(__name__)
 
-def start_scheduler(config: Dict[str, Any], store: SQLiteStore, app) -> AsyncIOScheduler:
+def start_scheduler(
+    config: Dict[str, Any],
+    store: SQLiteStore,
+    app,
+    loop: asyncio.AbstractEventLoop | None = None,
+) -> AsyncIOScheduler:
     interval = int(config.get("scheduler", {}).get("run_interval_hours", 24))
-    sched = AsyncIOScheduler(timezone=config.get("bot", {}).get("timezone", "Africa/Lagos"))
+    # Bind APScheduler to the SAME asyncio event loop managed by python-telegram-bot.
+    # If we don't, PTB may create/own its own loop and APScheduler jobs can get cancelled
+    # or raise "event loop is already running".
+    sched = AsyncIOScheduler(
+        timezone=config.get("bot", {}).get("timezone", "Africa/Lagos"),
+        event_loop=loop,
+    )
 
     async def job():
         try:
