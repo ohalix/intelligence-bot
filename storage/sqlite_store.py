@@ -66,10 +66,21 @@ class SQLiteStore:
         except Exception:
             return
 
+        # Columns added over time. If a user already has an older DB file,
+        # SELECTs/INSERTs must not crash on missing columns.
         required: Dict[str, str] = {
-            "raw_json": "TEXT",
+            # Core payload fields
+            "type": "TEXT",
+            "title": "TEXT",
+            "description": "TEXT",
+            "url": "TEXT",
+            "timestamp": "TEXT",
+            # Optional enrichments
+            "chain": "TEXT",
+            "sector": "TEXT",
             "signal_score": "REAL",
             "sentiment": "REAL",
+            "raw_json": "TEXT",
         }
 
         for name, coltype in required.items():
