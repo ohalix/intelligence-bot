@@ -1,12 +1,7 @@
+import asyncio
 import logging
-import os
 import sys
 from pathlib import Path
-import asyncio
-
-# Ensure repo root is on path for local runs
-ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(ROOT))
 
 from telegram.ext import Application, CommandHandler
 
@@ -15,11 +10,53 @@ from utils.logging import setup_logging
 from storage.sqlite_store import SQLiteStore
 
 from bot.telegram_commands import (
-    cmd_dailybrief, cmd_news, cmd_newprojects, cmd_trends, cmd_funding, cmd_github, cmd_rawsignals
+    cmd_dailybrief,
+    cmd_funding,
+    cmd_github,
+    cmd_news,
+    cmd_newprojects,
+    cmd_rawsignals,
+    cmd_trends,
 )
 from bot.scheduler import start_scheduler
 
+# Ensure repo root is on path for local runs
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+
 logger = logging.getLogger(__name__)
+
+
+async def on_error(update, context):
+    """Global Telegram error handler.
+
+    Without this, PTB logs: "No error handlers are registered" and users get no feedback.
+    """
+    try:
+        chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
+        update_id = getattr(update, "update_id", None)
+
+        # Log full traceback server-side
+        logger.exception(
+            "Unhandled exception in handler (chat_id=%s, update_id=%s)",
+            chat_id,
+            update_id,
+            exc_info=context.error,
+        )
+
+        # Best-effort user-facing message
+        if chat_id is not None:
+            try:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="⚠️ Something went wrong while processing that command. Please check logs.",
+                )
+            except Exception:
+                logger.exception("Failed to send error message to chat_id=%s", chat_id)
+    except Exception:
+        # Never raise from an error handler
+        logger.exception("Error inside global Telegram error handler")
+
 
 def main():
     config = load_config()
@@ -27,6 +64,7 @@ def main():
 
     token = config.get("bot", {}).get("telegram_token")
     if not token:
+        logger.error("Missing TELEGRAM_BOT_TOKEN. Set it in your environment or .env file.")
         raise RuntimeError("TELEGRAM_BOT_TOKEN is required")
 
     store = SQLiteStore(config.get("storage", {}).get("database_path", "./data/web3_intelligence.db"))
@@ -52,6 +90,10 @@ def main():
         .post_shutdown(_post_shutdown)
         .build()
     )
+
+    # Global error handler
+    app.add_error_handler(on_error)
+
     app.bot_data["config"] = config
     app.bot_data["store"] = store
 
@@ -67,6 +109,7 @@ def main():
     # IMPORTANT: run_polling is a blocking call that manages the asyncio loop internally.
     # Do NOT wrap it in asyncio.run() and do NOT await it.
     app.run_polling(allowed_updates=["message"])
+
 
 if __name__ == "__main__":
     main()
