@@ -35,7 +35,7 @@ class SQLiteStore:
                 sentiment REAL,
                 raw_json TEXT
             )""")
-                        self._migrate_signals_table(conn)
+            self._migrate_signals_table(conn)
 
             conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals(timestamp)")
             conn.commit()
