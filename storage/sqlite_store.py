@@ -35,6 +35,8 @@ class SQLiteStore:
                 sentiment REAL,
                 raw_json TEXT
             )""")
+                        self._migrate_signals_table(conn)
+
             conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals(timestamp)")
             conn.commit()
 
@@ -48,7 +50,30 @@ class SQLiteStore:
             conn.execute("INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
             conn.commit()
 
-    def get_last_run(self) -> Optional[datetime]:
+    
+    def _migrate_signals_table(self, conn: sqlite3.Connection) -> None:
+        """Ensure older DBs get new columns without breaking startup."""
+        try:
+            cols = {row["name"] for row in conn.execute("PRAGMA table_info(signals)").fetchall()}
+        except Exception:
+            return
+
+        required: dict[str, str] = {
+            # Older DBs may not have these columns:
+            "raw_json": "TEXT",
+            "signal_score": "REAL",
+            "sentiment": "REAL",
+        }
+
+        for name, coltype in required.items():
+            if name in cols:
+                continue
+            try:
+                conn.execute(f"ALTER TABLE signals ADD COLUMN {name} {coltype}")
+            except sqlite3.OperationalError:
+                pass
+
+def get_last_run(self) -> Optional[datetime]:
         v = self.get_meta("last_run_timestamp")
         if not v:
             return None
