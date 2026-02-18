@@ -26,6 +26,31 @@ from utils.http import make_timeout
 
 logger = logging.getLogger(__name__)
 
+
+def _sentiment_type_stats(signals: List[Dict[str, Any]]) -> Dict[str, int]:
+    """Aggregated sentiment representation stats for debugging/data-integrity."""
+    stats: Dict[str, int] = {}
+    for s in signals:
+        v = s.get("sentiment")
+        if v is None:
+            k = "missing"
+        elif isinstance(v, (int, float)):
+            k = "numeric"
+        elif isinstance(v, str):
+            sv = v.strip().lower()
+            if not sv:
+                k = "empty_str"
+            else:
+                try:
+                    float(sv)
+                    k = "numeric_str"
+                except Exception:
+                    k = "label_str"
+        else:
+            k = type(v).__name__
+        stats[k] = stats.get(k, 0) + 1
+    return stats
+
 def rolling_since(config: Dict[str, Any], store: SQLiteStore) -> datetime:
     hours = int(config.get("storage", {}).get("rolling_window_hours", 24))
     last = store.get_last_run()
@@ -65,9 +90,16 @@ async def run_pipeline(config: Dict[str, Any], store: SQLiteStore, manual: bool=
     ranker = SignalRanker(config)
 
     processed = dedup.dedup(raw)
+    if len(processed) != len(raw):
+        logger.info(f"Dedup: kept={len(processed)} dropped={max(0, len(raw) - len(processed))}")
+
+    before_spam = len(processed)
     processed = spam.filter(processed)
+    if len(processed) != before_spam:
+        logger.info(f"SpamFilter: kept={len(processed)} dropped={max(0, before_spam - len(processed))}")
     processed = [feat.enrich(s) for s in processed]
     processed = sent.add_sentiment(processed)
+    logger.info(f"Sentiment types: {_sentiment_type_stats(processed)}")
     ranked = ranker.rank(processed)
 
     inserted = store.upsert_signals(ranked)
