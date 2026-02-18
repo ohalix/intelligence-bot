@@ -9,6 +9,10 @@ class TrendDetector:
             if k not in agg:
                 agg[k] = {"chain": s.get("chain","unknown"), "sector": s.get("sector","unknown"), "count": 0, "score_sum": 0.0}
             agg[k]["count"] += 1
-            agg[k]["score_sum"] += float(s.get("signal_score",0.0))
+            v = s.get("signal_score")
+            try:
+                agg[k]["score_sum"] += float(v) if v is not None else 0.0
+            except Exception:
+                agg[k]["score_sum"] += 0.0
         trends = sorted(agg.values(), key=lambda x: (x["count"], x["score_sum"]), reverse=True)[:8]
         return {"trends": trends}

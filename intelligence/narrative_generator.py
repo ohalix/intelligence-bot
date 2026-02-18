@@ -14,7 +14,14 @@ class NarrativeGenerator:
                 "chain": chain,
                 "sector": sector,
                 "count": len(items),
-                "top_titles": [i.get("title","") for i in sorted(items, key=lambda x: x.get("signal_score",0), reverse=True)[:3]],
+                "top_titles": [
+                    i.get("title", "")
+                    for i in sorted(
+                        items,
+                        key=lambda x: (x.get("signal_score") or 0.0),
+                        reverse=True,
+                    )[:3]
+                ],
             })
         out.sort(key=lambda x: x["count"], reverse=True)
         return out[:8]
