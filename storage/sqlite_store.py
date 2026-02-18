@@ -2,147 +2,112 @@ import json
 import os
 import sqlite3
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
-
+from typing import Any, Dict, List, Optional, Tuple
 
 class SQLiteStore:
-    """SQLite-backed rolling 24h store with dedup cache + checkpoints."""
-
-    def __init__(self, config_or_path: Any):
-        if isinstance(config_or_path, dict):
-            self.config = config_or_path
-            db_path = (
-                self.config.get("storage", {}).get("db_path")
-                or os.getenv("SQLITE_DB_PATH")
-                or os.path.join(os.path.dirname(__file__), "..", "data", "signals.db")
-            )
-        else:
-            self.config = {}
-            db_path = str(config_or_path)
-
-        self.db_path = os.path.abspath(db_path)
-        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+    def __init__(self, db_path: str):
+        self.db_path = db_path
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
         self._init_db()
 
-    def _conn(self):
-        return sqlite3.connect(self.db_path)
+    def _conn(self) -> sqlite3.Connection:
+        c = sqlite3.connect(self.db_path)
+        c.row_factory = sqlite3.Row
+        return c
 
-    def _init_db(self):
+    def _init_db(self) -> None:
         with self._conn() as conn:
-            cur = conn.cursor()
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS signals (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    dedup_key TEXT UNIQUE,
-                    source TEXT,
-                    type TEXT,
-                    title TEXT,
-                    text TEXT,
-                    description TEXT,
-                    url TEXT,
-                    timestamp TEXT,
-                    signal_score REAL,
-                    payload_json TEXT
-                )
-                """
-            )
-            cur.execute(
-                """
-                CREATE TABLE IF NOT EXISTS checkpoints (
-                    key TEXT PRIMARY KEY,
-                    value TEXT
-                )
-                """
-            )
+            conn.execute("""CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS signals (
+                dedup_key TEXT PRIMARY KEY,
+                source TEXT,
+                type TEXT,
+                title TEXT,
+                description TEXT,
+                url TEXT,
+                timestamp TEXT,
+                chain TEXT,
+                sector TEXT,
+                signal_score REAL,
+                sentiment REAL,
+                raw_json TEXT
+            )""")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals(timestamp)")
             conn.commit()
 
-    def set_checkpoint(self, key: str, value: str) -> None:
+    def get_meta(self, key: str) -> Optional[str]:
         with self._conn() as conn:
-            conn.execute(
-                "INSERT INTO checkpoints(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (key, value),
-            )
+            row = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+            return row["value"] if row else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        with self._conn() as conn:
+            conn.execute("INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
             conn.commit()
 
-    def get_checkpoint(self, key: str) -> Optional[str]:
+    def get_last_run(self) -> Optional[datetime]:
+        v = self.get_meta("last_run_timestamp")
+        if not v:
+            return None
+        try:
+            return datetime.fromisoformat(v)
+        except Exception:
+            return None
+
+    def set_last_run(self, ts: datetime) -> None:
+        self.set_meta("last_run_timestamp", ts.isoformat())
+
+    def upsert_signals(self, signals: List[Dict[str, Any]]) -> int:
+        inserted = 0
         with self._conn() as conn:
-            cur = conn.execute("SELECT value FROM checkpoints WHERE key=?", (key,))
-            row = cur.fetchone()
-            return row[0] if row else None
+            for s in signals:
+                try:
+                    conn.execute("""INSERT OR IGNORE INTO signals(
+                        dedup_key, source, type, title, description, url, timestamp, chain, sector, signal_score, sentiment, raw_json
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                        s.get("dedup_key"),
+                        s.get("source"),
+                        s.get("type"),
+                        s.get("title"),
+                        s.get("description"),
+                        s.get("url"),
+                        (s.get("timestamp").isoformat() if hasattr(s.get("timestamp"), "isoformat") else str(s.get("timestamp"))),
+                        s.get("chain"),
+                        s.get("sector"),
+                        float(s.get("signal_score", 0.0)),
+                        float(s.get("sentiment", 0.0)),
+                        json.dumps(s, default=str),
+                    ))
+                    if conn.total_changes:
+                        inserted += 1
+                except Exception:
+                    continue
+            conn.commit()
+        return inserted
 
-    def _to_row(self, signal: Dict[str, Any]) -> Dict[str, Any]:
-        ts = signal.get("timestamp")
-        if isinstance(ts, datetime):
-            ts_str = ts.isoformat()
-        elif isinstance(ts, str):
-            ts_str = ts
-        else:
-            ts_str = datetime.utcnow().isoformat()
-
-        return {
-            "dedup_key": signal.get("dedup_key") or signal.get("id") or signal.get("url") or json.dumps(signal, sort_keys=True)[:64],
-            "source": signal.get("source"),
-            "type": signal.get("type"),
-            "title": signal.get("title"),
-            "text": signal.get("text"),
-            "description": signal.get("description"),
-            "url": signal.get("url"),
-            "timestamp": ts_str,
-            "signal_score": float(signal.get("signal_score", 0.0) or 0.0),
-            "payload_json": json.dumps(signal, default=str),
-        }
-
-    def store_signal(self, signal: Dict[str, Any]) -> bool:
-        row = self._to_row(signal)
+    def purge_old(self, max_days: int) -> None:
+        cutoff = datetime.utcnow() - timedelta(days=max_days)
         with self._conn() as conn:
-            try:
-                conn.execute(
-                    """
-                    INSERT INTO signals(dedup_key, source, type, title, text, description, url, timestamp, signal_score, payload_json)
-                    VALUES(?,?,?,?,?,?,?,?,?,?)
-                    """,
-                    (
-                        row["dedup_key"],
-                        row["source"],
-                        row["type"],
-                        row["title"],
-                        row["text"],
-                        row["description"],
-                        row["url"],
-                        row["timestamp"],
-                        row["signal_score"],
-                        row["payload_json"],
-                    ),
-                )
-                conn.commit()
-                return True
-            except sqlite3.IntegrityError:
-                return False
+            conn.execute("DELETE FROM signals WHERE timestamp < ?", (cutoff.isoformat(),))
+            conn.commit()
 
-    def get_signals(self, limit: int = 10, source: Optional[str] = None) -> List[Dict[str, Any]]:
-        q = "SELECT payload_json FROM signals"
-        params: List[Any] = []
+    def get_signals_since(self, since: datetime, source: Optional[str]=None, limit: int=50) -> List[Dict[str, Any]]:
+        q = "SELECT raw_json FROM signals WHERE timestamp >= ?"
+        params = [since.isoformat()]
         if source:
-            q += " WHERE source=?"
+            q += " AND source = ?"
             params.append(source)
         q += " ORDER BY signal_score DESC, timestamp DESC LIMIT ?"
         params.append(int(limit))
-
+        with self._conn() as conn:
+            rows = conn.execute(q, tuple(params)).fetchall()
         out: List[Dict[str, Any]] = []
-        with self._conn() as conn:
-            cur = conn.execute(q, params)
-            for (payload,) in cur.fetchall():
-                try:
-                    out.append(json.loads(payload))
-                except Exception:
-                    pass
+        for r in rows:
+            try:
+                out.append(json.loads(r["raw_json"]))
+            except Exception:
+                continue
         return out
-
-    def purge_old_signals(self, hours: int = 24) -> int:
-        cutoff = datetime.utcnow() - timedelta(hours=hours)
-        cutoff_iso = cutoff.isoformat()
-        with self._conn() as conn:
-            cur = conn.execute("DELETE FROM signals WHERE timestamp < ?", (cutoff_iso,))
-            conn.commit()
-            return cur.rowcount or 0
