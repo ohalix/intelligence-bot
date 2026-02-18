@@ -18,7 +18,8 @@ def make_timeout(config: Dict[str, Any]) -> aiohttp.ClientTimeout:
     retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError, HTTPError)),
 )
 async def fetch_json(session: aiohttp.ClientSession, url: str, headers: Optional[Dict[str,str]]=None, params: Optional[Dict[str,Any]]=None) -> Any:
-    async with session.get(url, headers=headers, params=params, timeout=session.timeout) as r:
+    timeout = getattr(session, "timeout", None)
+    async with session.get(url, headers=headers, params=params, timeout=timeout) as r:
         if r.status >= 500:
             raise HTTPError(f"Server error {r.status}")
         if r.status == 429:
@@ -35,7 +36,8 @@ async def fetch_json(session: aiohttp.ClientSession, url: str, headers: Optional
     retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError, HTTPError)),
 )
 async def fetch_text(session: aiohttp.ClientSession, url: str, headers: Optional[Dict[str,str]]=None, params: Optional[Dict[str,Any]]=None) -> str:
-    async with session.get(url, headers=headers, params=params, timeout=session.timeout) as r:
+    timeout = getattr(session, "timeout", None)
+    async with session.get(url, headers=headers, params=params, timeout=timeout) as r:
         if r.status >= 500:
             raise HTTPError(f"Server error {r.status}")
         if r.status == 429:
