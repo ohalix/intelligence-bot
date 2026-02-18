@@ -7,7 +7,14 @@ from telegram.ext import ContextTypes
 
 from bot.formatter import format_section, format_dailybrief
 from storage.sqlite_store import SQLiteStore
-from engine.pipeline import run_pipeline, build_daily_payload
+from engine.pipeline import run_pipeline
+
+# Some repos drifted and this symbol was renamed, which caused VM startup
+# ImportErrors. Keep a conservative fallback without changing behaviour.
+try:
+    from engine.pipeline import build_daily_payload
+except ImportError:  # pragma: no cover
+    from engine.pipeline import build_daily_brief_payload as build_daily_payload
 
 logger = logging.getLogger(__name__)
 
@@ -67,3 +74,15 @@ async def cmd_rawsignals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     cfg = context.bot_data["config"]; store: SQLiteStore = context.bot_data["store"]
     signals = store.get_signals_since(_since(cfg), source=None, limit=cfg["analysis"]["top_signals_to_analyze"])
     await update.message.reply_text(format_section("Raw Signals", signals), parse_mode="MarkdownV2", disable_web_page_preview=True)
+
+
+# Explicit exports to make `from bot.telegram_commands import cmd_*` robust.
+__all__ = [
+    "cmd_dailybrief",
+    "cmd_news",
+    "cmd_newprojects",
+    "cmd_trends",
+    "cmd_funding",
+    "cmd_github",
+    "cmd_rawsignals",
+]
