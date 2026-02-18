@@ -1,57 +1,57 @@
-import hashlib
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Dict, List
-
 import feedparser
+
+from .base_ingest import BaseIngester
+from utils.http import fetch_text
 
 logger = logging.getLogger(__name__)
 
-def _hash_id(url: str) -> str:
-    return hashlib.sha256(url.encode("utf-8")).hexdigest()[:32]
+DEFAULT_ECOSYSTEM_FEEDS = [
+    "https://blog.arbitrum.io/rss/",
+    "https://blog.optimism.io/feed",
+    "https://solana.com/rss.xml",
+]
 
-class EcosystemIngester:
-    """RSS/blog feeds from ecosystems (L2s, Solana, Bitcoin L2s, etc.)."""
+class EcosystemIngester(BaseIngester):
+    """Ingest ecosystem/grants/announcements from RSS/Atom feeds.
 
-    def __init__(self, sources: List[str]):
-        self.sources = [s.strip() for s in (sources or []) if s and s.strip()]
+    The pipeline constructs all ingesters with (config, session). Some earlier
+    revisions of this repo had this class accept only (config), which caused:
+        TypeError: EcosystemIngester.__init__() takes 2 positional arguments but 3 were given
+
+    To keep the contract consistent (and avoid redesign), we explicitly accept
+    (config, session) and delegate to BaseIngester.
+    """
+
+    def __init__(self, config: Dict[str, Any], session):
+        super().__init__(config, session)
 
     async def ingest(self, since: datetime) -> List[Dict[str, Any]]:
-        if not self.sources:
-            return []
-        since_ts = since.astimezone(timezone.utc)
-        out: List[Dict[str, Any]] = []
-
-        for url in self.sources:
+        feeds = self.config.get("ingestion", {}).get("ecosystem_sources") or DEFAULT_ECOSYSTEM_FEEDS
+        signals: List[Dict[str, Any]] = []
+        for feed_url in feeds:
             try:
-                feed = feedparser.parse(url)
-                for e in feed.entries:
+                xml = await fetch_text(self.session, feed_url)
+                parsed = feedparser.parse(xml)
+                for entry in parsed.entries:
                     published = None
-                    if getattr(e, "published_parsed", None):
-                        published = datetime(*e.published_parsed[:6], tzinfo=timezone.utc)
-                    elif getattr(e, "updated_parsed", None):
-                        published = datetime(*e.updated_parsed[:6], tzinfo=timezone.utc)
-
-                    if published and published < since_ts:
+                    if getattr(entry, "published_parsed", None):
+                        published = datetime(*entry.published_parsed[:6])
+                    if published and published <= since:
                         continue
-
-                    title = (getattr(e, "title", "") or "").strip()
-                    link = (getattr(e, "link", "") or "").strip()
-                    summary = (getattr(e, "summary", "") or "").strip()
-
-                    if not link or not title:
-                        continue
-
-                    out.append({
-                        "id": _hash_id(link),
-                        "created_at": (published.isoformat() if published else datetime.now(timezone.utc).isoformat()),
+                    title = getattr(entry, "title", "") or ""
+                    summary = getattr(entry, "summary", "") or ""
+                    signals.append({
                         "source": "ecosystem",
+                        "type": "ecosystem_announcement",
                         "title": title,
-                        "url": link,
-                        "summary": summary[:5000],
-                        "metadata": {"feed": url},
+                        "description": summary,
+                        "url": getattr(entry, "link", "") or "",
+                        "timestamp": published or datetime.utcnow(),
+                        "source_name": getattr(parsed.feed, "title", "ecosystem"),
                     })
-            except Exception as ex:
-                logger.warning("EcosystemIngester failed for %s: %s", url, ex)
-
-        return out
+            except Exception as e:
+                logger.warning(f"EcosystemIngester failed for {feed_url}: {e}")
+        return signals
