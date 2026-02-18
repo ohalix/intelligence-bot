@@ -1,0 +1,15 @@
+[Unit]
+Description=Web3 Intelligence Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/web3-intelligence
+EnvironmentFile=/opt/web3-intelligence/.env
+ExecStart=/opt/web3-intelligence/venv/bin/python main.py
+Restart=always
+RestartSec=5
+User=ubuntu
+
+[Install]
+WantedBy=multi-user.target
