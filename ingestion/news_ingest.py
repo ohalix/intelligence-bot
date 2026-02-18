@@ -27,12 +27,19 @@ class NewsIngester:
         if not sources:
             return []
 
+        timeout_s = float(self.config.get("http", {}).get("timeout_seconds", 15))
+
         out: List[Dict[str, Any]] = []
         for url in sources:
             try:
-                resp = await self.session.get(url)
+                resp = await self.session.get(url, timeout=timeout_s)
                 resp.raise_for_status()
-                feed = feedparser.parse(resp.text)
+                # Fix for internal bug: if a response-like object exposes `text` as a
+                # callable (or is accidentally shadowed), feedparser will receive a
+                # function and then crash trying to call `.encode()` on it.
+                text_attr = getattr(resp, "text", "")
+                content = text_attr() if callable(text_attr) else text_attr
+                feed = feedparser.parse(content)
 
                 for entry in feed.entries:
                     published_dt = _parse_entry_datetime(entry)
@@ -44,7 +51,8 @@ class NewsIngester:
                         continue
 
                     title = (entry.get("title") or "").strip()
-                    link = (entry.get("link") or "").strip()
+                    link_val = entry.get("link")
+                    link = (str(link_val) if link_val is not None else "").strip()
                     summary = (entry.get("summary") or entry.get("description") or "").strip()
                     if not title or not link:
                         continue

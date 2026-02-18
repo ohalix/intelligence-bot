@@ -11,7 +11,10 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_ECOSYSTEM_FEEDS = [
     "https://blog.arbitrum.io/rss/",
-    "https://blog.optimism.io/feed",
+    # blog.optimism.io has recurring DNS issues; use maintained official feeds.
+    # Optimism blog (Mirror) Atom + Optimism developer blog RSS.
+    "https://optimism.mirror.xyz/feed/atom",
+    "https://dev.optimism.io/rss/",
     "https://solana.com/rss.xml",
 ]
 
