@@ -159,6 +159,14 @@ async def send_dailybrief(config: Dict[str, Any], store: SQLiteStore, bot) -> No
         return
     payload = build_daily_payload(config, store, include_sections=True)
     payload["analysis"] = await compute_analysis(config, payload)
-    from bot.formatter import format_dailybrief
-    msg = format_dailybrief(payload)
-    await bot.send_message(chat_id=chat_id, text=msg, parse_mode="MarkdownV2", disable_web_page_preview=True)
+    # Prefer Telegram HTML for robustness (avoids MarkdownV2 entity parse failures).
+    from telegram.constants import ParseMode
+    from bot.formatter import format_dailybrief_html
+
+    msg = format_dailybrief_html(payload)
+    await bot.send_message(
+        chat_id=chat_id,
+        text=msg,
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+    )
