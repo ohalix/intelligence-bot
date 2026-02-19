@@ -41,10 +41,10 @@ debug.log
 ############################################
 # Environment / Secrets (IMPORTANT)
 ############################################
-# .env
-# .env.*
-# !.env.example
-# *.env.local
+.env
+.env.*
+!.env.example
+*.env.local
 *.pem
 *.key
 *.p12
@@ -160,4 +160,4 @@ tmp/
 # Keep these examples if you want tracked
 ############################################
 !.gitignore
-# !.env.example
+!.env.example
