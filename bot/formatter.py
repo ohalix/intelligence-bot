@@ -65,7 +65,8 @@ def format_dailybrief(payload: Dict[str, Any]) -> str:
     for header, signals in payload.get("sections", {}).items():
         parts.append(f"*{escape_md(header)}*")
         if not signals:
-            parts.append("_No signals in the last 24h\._")
+            # Use \\. to avoid Python's invalid escape sequence warning.
+            parts.append("_No signals in the last 24h\\._")
             parts.append("")
             continue
         for s in signals:

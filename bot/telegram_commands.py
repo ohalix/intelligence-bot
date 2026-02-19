@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import re
+from importlib import import_module
 from typing import Optional
 
 from telegram import Update
@@ -228,3 +230,73 @@ async def cmd_github(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def cmd_newprojects(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await cmd_dailybrief(update, context)
+
+
+def _read_sources_from_module(mod_path: str, candidates: list[str]) -> tuple[str, list[str]]:
+    """Best-effort extraction of sources from ingestion modules.
+
+    Some deployments import/register cmd_sources from this module.
+    This helper is intentionally defensive and never raises.
+    """
+
+    try:
+        mod = import_module(mod_path)
+    except Exception:
+        return mod_path, []
+
+    for name in candidates:
+        try:
+            val = getattr(mod, name)
+        except Exception:
+            continue
+
+        if isinstance(val, (list, tuple)):
+            return name, [str(x) for x in val]
+        if isinstance(val, dict):
+            out: list[str] = []
+            for k, v in val.items():
+                if isinstance(v, (list, tuple)):
+                    out.append(f"{k}: {', '.join(map(str, v))}")
+                else:
+                    out.append(f"{k}: {v}")
+            return name, out
+
+    return mod_path, []
+
+
+async def cmd_sources(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show currently configured ingestion sources.
+
+    Minimal compatibility handler to satisfy imports/registrations.
+    """
+
+    mappings = [
+        ("ingestion.twitter_ingest", ["ACCOUNTS", "TWITTER_ACCOUNTS", "TWITTER_USERS", "SOURCES", "FEEDS"]),
+        ("ingestion.news_ingest", ["NEWS_FEEDS", "SOURCES", "FEEDS"]),
+        ("ingestion.github_ingest", ["GITHUB_REPOS", "REPOS", "TOPICS", "ORGS", "SOURCES"]),
+        ("ingestion.funding_ingest", ["FUNDING_FEEDS", "SOURCES", "FEEDS"]),
+        ("ingestion.ecosystem_ingest", ["ECOSYSTEM_FEEDS", "SOURCES", "FEEDS"]),
+    ]
+
+    lines: list[str] = ["<b>Current ingestion sources</b>", ""]
+    for mod_path, candidates in mappings:
+        label, sources = _read_sources_from_module(mod_path, candidates)
+        header = mod_path.split(".")[-1].replace("_ingest", "").replace("_", " ").title()
+        lines.append(f"<b>{html.escape(header)}</b>")
+        if sources:
+            lines.append(f"<i>{html.escape(label)}</i>")
+            for s in sources[:50]:
+                lines.append(f"• {html.escape(s)}")
+            if len(sources) > 50:
+                lines.append(f"… (+{len(sources) - 50} more)")
+        else:
+            lines.append("(no sources found)")
+        lines.append("")
+
+    await _safe_reply(
+        update,
+        context,
+        "\n".join(lines).strip(),
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+    )
