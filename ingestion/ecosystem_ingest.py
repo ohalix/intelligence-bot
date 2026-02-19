@@ -8,10 +8,12 @@ import feedparser
 from utils.http import fetch_text
 from utils.web_scraper import scrape_page_links
 
+from ingestion.api_sources import governance_from_snapshot
+
 logger = logging.getLogger(__name__)
 
 # RSS/Atom sources (should be directly parseable)
-ECOSYSTEM_FEEDS = [
+DEFAULT_ECOSYSTEM_FEEDS = [
     # Optimism: Discourse forum RSS (official)
     "https://gov.optimism.io/latest.rss",
     # Arbitrum
@@ -27,7 +29,7 @@ ECOSYSTEM_FEEDS = [
 ]
 
 # Web pages to scrape (fallback + augment)
-ECOSYSTEM_WEB_PAGES = [
+DEFAULT_ECOSYSTEM_WEB_PAGES = [
     # Optimism blog page (DNS for blog.optimism.io has been flaky)
     "https://www.optimism.io/blog",
     # Arbitrum blog
@@ -51,6 +53,12 @@ class EcosystemIngester:
         self.session = session
 
     async def ingest(self, since: datetime) -> List[Dict[str, Any]]:
+        ing = self.config.get("ingestion", {})
+        rss_sources = ing.get("ecosystem_rss_sources", DEFAULT_ECOSYSTEM_FEEDS)
+        web_sources = ing.get("ecosystem_web_sources", DEFAULT_ECOSYSTEM_WEB_PAGES)
+        api_sources = ing.get("ecosystem_api_sources", [])
+        snapshot_spaces = ing.get("snapshot_spaces", [])
+
         concurrency = int(self.config.get("ingestion", {}).get("ecosystem_concurrency", 5))
         sem = asyncio.Semaphore(concurrency)
 
@@ -130,20 +138,50 @@ class EcosystemIngester:
                         logger.warning("EcosystemIngester WEB failed for %s: %s", url, e)
                     return []
 
-        # Run RSS + WEB concurrently to maximize coverage.
-        rss_tasks = [_rss(u) for u in ECOSYSTEM_FEEDS]
-        web_tasks = [_web(u) for u in ECOSYSTEM_WEB_PAGES]
-        results = await asyncio.gather(*(rss_tasks + web_tasks))
+        async def _api(name: str) -> List[Dict[str, Any]]:
+            async with sem:
+                stats.setdefault("api_attempted", 0)
+                stats.setdefault("api_success", 0)
+                stats.setdefault("api_fail", 0)
+                stats["api_attempted"] += 1
+                try:
+                    api = (name or "").strip().lower()
+                    if api == "snapshot_proposals":
+                        out = await governance_from_snapshot(self.session, since, list(snapshot_spaces))
+                    elif api == "defillama_chain_tvl":
+                        # Implemented as no-op for now to avoid schema guessing.
+                        out = []
+                    else:
+                        logger.warning("Unknown ecosystem API source: %s", name)
+                        out = []
+                    stats["api_success"] += 1
+                    stats["items"] += len(out)
+                    return out
+                except Exception as e:
+                    stats["api_fail"] += 1
+                    key = type(e).__name__
+                    stats["errors"][key] = stats["errors"].get(key, 0) + 1
+                    logger.warning("EcosystemIngester API failed for %s: %s", name, e)
+                    return []
+
+        # Run RSS + WEB + API concurrently to maximize coverage.
+        rss_tasks = [_rss(u) for u in rss_sources]
+        web_tasks = [_web(u) for u in web_sources]
+        api_tasks = [_api(u) for u in api_sources]
+        results = await asyncio.gather(*(rss_tasks + web_tasks + api_tasks))
         flattened = [x for sub in results for x in sub]
 
         logger.info(
-            "EcosystemIngester run: rss_attempted=%s rss_success=%s rss_fail=%s web_attempted=%s web_success=%s web_fail=%s items=%s top_errors=%s",
+            "EcosystemIngester run: rss_attempted=%s rss_success=%s rss_fail=%s web_attempted=%s web_success=%s web_fail=%s api_attempted=%s api_success=%s api_fail=%s items=%s top_errors=%s",
             stats["rss_attempted"],
             stats["rss_success"],
             stats["rss_fail"],
             stats["web_attempted"],
             stats["web_success"],
             stats["web_fail"],
+            stats.get("api_attempted", 0),
+            stats.get("api_success", 0),
+            stats.get("api_fail", 0),
             stats["items"],
             dict(sorted(stats["errors"].items(), key=lambda kv: kv[1], reverse=True)[:3]),
         )
