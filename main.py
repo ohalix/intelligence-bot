@@ -76,6 +76,21 @@ def main():
         scheduler = start_scheduler(config, store, application, loop=loop)
         application.bot_data["apscheduler"] = scheduler
 
+        # One-time startup notification (best-effort, never crashes bot).
+        try:
+            admin_chat_id = config.get("bot", {}).get("admin_chat_id")
+            if admin_chat_id:
+                from datetime import datetime
+
+                ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+                await application.bot.send_message(
+                    chat_id=admin_chat_id,
+                    text=f"✅ Intelligence bot is running — {ts}",
+                    disable_web_page_preview=True,
+                )
+        except Exception:
+            logger.exception("Startup notification failed")
+
     async def _post_shutdown(application: Application):
         scheduler = application.bot_data.get("apscheduler")
         try:
