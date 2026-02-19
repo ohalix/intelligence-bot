@@ -59,6 +59,18 @@ class DummyResp:
         return SAMPLE_RSS
 
     async def json(self):
+        # Minimal JSON responses for API ingesters
+        if "cryptocurrency.cv" in self.url:
+            return [
+                {
+                    "title": "API News Item",
+                    "url": "https://example.com/api-news",
+                    "description": "api desc",
+                    "published_at": "2026-02-17T10:00:00Z",
+                }
+            ]
+        if "pro-api.coinmarketcap.com" in self.url:
+            return {"data": [{"title": "CMC Post", "url": "https://example.com/cmc", "subtitle": "sub", "created_at": "2026-02-17T10:00:00Z"}]}
         # Minimal GitHub search response
         return {"items": [{"full_name": "acme/proto", "html_url": "https://github.com/acme/proto", "description": "test", "pushed_at": "2026-02-17T00:00:00Z"}]}
 
@@ -80,7 +92,7 @@ async def run_once() -> None:
         "github": {"queries": [], "concurrency": 1},
     }
 
-    since = datetime.utcnow() - timedelta(days=2)
+    since = datetime.utcnow() - timedelta(days=3)
     sess = DummySession()
 
     news = NewsIngester(cfg, sess)
