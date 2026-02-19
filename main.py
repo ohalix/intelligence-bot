@@ -16,6 +16,7 @@ from bot.telegram_commands import (
     cmd_news,
     cmd_newprojects,
     cmd_rawsignals,
+    cmd_run,
     cmd_sources,
     cmd_trends,
 )
@@ -76,20 +77,38 @@ def main():
         scheduler = start_scheduler(config, store, application, loop=loop)
         application.bot_data["apscheduler"] = scheduler
 
-        # One-time startup notification (best-effort, never crashes bot).
-        try:
-            admin_chat_id = config.get("bot", {}).get("admin_chat_id")
-            if admin_chat_id:
-                from datetime import datetime
+        # In-process lock to prevent concurrent pipeline runs (startup vs /run vs scheduler).
+        # Stored in bot_data so command handlers can use it.
+        application.bot_data.setdefault("pipeline_lock", asyncio.Lock())
 
-                ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-                await application.bot.send_message(
-                    chat_id=admin_chat_id,
-                    text=f"✅ Intelligence bot is running — {ts}",
-                    disable_web_page_preview=True,
-                )
-        except Exception:
-            logger.exception("Startup notification failed")
+        # Trigger a one-time startup ingestion for the last 24 hours.
+        # Must never crash bot and must not block Telegram update handling.
+        async def _startup_ingest():
+            from datetime import datetime, timedelta
+
+            lock: asyncio.Lock = application.bot_data["pipeline_lock"]
+            if lock.locked():
+                logger.info("Startup ingestion skipped: pipeline already running.")
+                return
+
+            since = datetime.utcnow() - timedelta(hours=24)
+            logger.info("Startup ingestion run triggered: since=%s", since.isoformat())
+
+            try:
+                async with lock:
+                    from engine.pipeline import run_pipeline
+
+                    result = await run_pipeline(config, store, manual=False, since_override=since)
+                    logger.info(
+                        "Startup ingestion run completed: inserted=%s total_seen=%s",
+                        result.get("inserted"),
+                        result.get("count"),
+                    )
+            except Exception:
+                logger.exception("Startup ingestion run failed")
+
+        # Fire-and-forget.
+        asyncio.create_task(_startup_ingest())
 
     async def _post_shutdown(application: Application):
         scheduler = application.bot_data.get("apscheduler")
@@ -121,6 +140,7 @@ def main():
     app.add_handler(CommandHandler("github", cmd_github))
     app.add_handler(CommandHandler("rawsignals", cmd_rawsignals))
     app.add_handler(CommandHandler("sources", cmd_sources))
+    app.add_handler(CommandHandler("run", cmd_run))
 
     logger.info("Bot started (long polling).")
     # IMPORTANT: run_polling is a blocking call that manages the asyncio loop internally.
