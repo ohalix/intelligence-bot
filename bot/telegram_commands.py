@@ -18,6 +18,7 @@ from storage.sqlite_store import SQLiteStore
 from .formatter import (
     format_dailybrief,
     format_dailybrief_html,
+    format_section_html,
 )
 
 log = logging.getLogger(__name__)
@@ -212,25 +213,120 @@ async def cmd_rawsignals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
 
 
-# Aliases: keep existing command names if the router maps them.
+def _window_since(cfg) -> "datetime":
+    from datetime import datetime, timedelta
+
+    hours = int(cfg.get("storage", {}).get("rolling_window_hours", 24))
+    return datetime.utcnow() - timedelta(hours=hours)
+
+
+def _section_limit(cfg) -> int:
+    return int(cfg.get("analysis", {}).get("top_signals_to_analyze", 10))
+
+
+# Section-specific commands.
 async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await cmd_dailybrief(update, context)
+    store: SQLiteStore = context.application.bot_data.get("store")
+    cfg = context.application.bot_data.get("config")
+
+    since = _window_since(cfg)
+    limit = _section_limit(cfg)
+    signals = store.get_signals_since(since, "news", limit=limit)
+
+    await _safe_reply(
+        update,
+        context,
+        format_section_html("News", signals),
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+    )
 
 
 async def cmd_trends(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await cmd_dailybrief(update, context)
+    store: SQLiteStore = context.application.bot_data.get("store")
+    cfg = context.application.bot_data.get("config")
+
+    payload = build_daily_payload(cfg, store, include_sections=False)
+    trends = (payload.get("inputs", {}) or {}).get("trends", {})
+    rows = (trends or {}).get("trends") or []
+
+    lines: list[str] = [f"<b>Trends — {html.escape(payload.get('date',''))}</b>"]
+    if not rows:
+        lines.append("<i>No trends in the last 24h.</i>")
+    else:
+        lines.append("<i>Top chain × sector clusters</i>")
+        for r in rows:
+            try:
+                chain = html.escape(str(r.get("chain", "unknown")))
+                sector = html.escape(str(r.get("sector", "unknown")))
+                count = html.escape(str(r.get("count", 0)))
+                score_sum = html.escape(str(round(float(r.get("score_sum", 0.0)), 2)))
+            except Exception:
+                continue
+            lines.append(f"• <b>{chain}</b> · {sector} — count {count} — scoreΣ {score_sum}")
+
+    await _safe_reply(
+        update,
+        context,
+        "\n".join(lines).strip(),
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+    )
 
 
 async def cmd_funding(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await cmd_dailybrief(update, context)
+    store: SQLiteStore = context.application.bot_data.get("store")
+    cfg = context.application.bot_data.get("config")
+
+    since = _window_since(cfg)
+    limit = _section_limit(cfg)
+    funding = store.get_signals_since(since, "funding", limit=limit)
+    ecosystem = store.get_signals_since(since, "ecosystem", limit=limit)
+    combined = (funding + ecosystem)[:limit]
+
+    await _safe_reply(
+        update,
+        context,
+        format_section_html("Funding & Ecosystem", combined),
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+    )
 
 
 async def cmd_github(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await cmd_dailybrief(update, context)
+    store: SQLiteStore = context.application.bot_data.get("store")
+    cfg = context.application.bot_data.get("config")
+
+    since = _window_since(cfg)
+    limit = _section_limit(cfg)
+    signals = store.get_signals_since(since, "github", limit=limit)
+
+    await _safe_reply(
+        update,
+        context,
+        format_section_html("GitHub", signals),
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+    )
 
 
 async def cmd_newprojects(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await cmd_dailybrief(update, context)
+    store: SQLiteStore = context.application.bot_data.get("store")
+    cfg = context.application.bot_data.get("config")
+
+    since = _window_since(cfg)
+    limit = _section_limit(cfg)
+    twitter = store.get_signals_since(since, "twitter", limit=limit)
+    github = store.get_signals_since(since, "github", limit=limit)
+    combined = (twitter + github)[:limit]
+
+    await _safe_reply(
+        update,
+        context,
+        format_section_html("New Projects", combined),
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+    )
 
 
 def _manual_run_meta_key_utc() -> str:
