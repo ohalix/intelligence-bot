@@ -8,11 +8,98 @@ import yaml
 DEFAULT_SETTINGS_PATH = Path(__file__).resolve().parents[1] / "config" / "settings.yaml"
 DEFAULT_ECOSYSTEMS_PATH = Path(__file__).resolve().parents[1] / "config" / "ecosystems.json"
 
+# -----------------------------
+# Ingestion defaults (stable, high-signal)
+# -----------------------------
+
+# News
+DEFAULT_NEWS_RSS_SOURCES = [
+    "https://www.coindesk.com/arc/outboundfeeds/rss/",
+    "https://decrypt.co/feed",
+]
+DEFAULT_NEWS_WEB_SOURCES = [
+    "https://decrypt.co/news",
+    "https://www.coindesk.com/",
+]
+DEFAULT_NEWS_API_SOURCES = [
+    # Public, no-key: cryptocurrency.cv
+    "cryptocurrency_cv",
+    # Free-keyed: CoinMarketCap /v1/content/posts/latest (disabled if no key)
+    "coinmarketcap_posts_latest",
+]
+
+# Ecosystem (official blogs + governance)
+DEFAULT_ECOSYSTEM_RSS_SOURCES = [
+    "https://blog.ethereum.org/feed.xml",
+    "https://blog.arbitrum.io/rss/",
+]
+DEFAULT_ECOSYSTEM_WEB_SOURCES = [
+    "https://blog.optimism.io/",
+    "https://www.starknet.io/en/content/",
+]
+DEFAULT_ECOSYSTEM_API_SOURCES = [
+    # Public, no-key: Snapshot Hub GraphQL (governance proposals)
+    "snapshot_proposals",
+    # Public, no-key: DefiLlama open API (ecosystem metrics signals)
+    "defillama_chain_tvl",
+]
+
+# Funding
+DEFAULT_FUNDING_RSS_SOURCES = [
+    "https://www.theblock.co/rss.xml",
+    "https://messari.io/rss",
+]
+DEFAULT_FUNDING_WEB_SOURCES = [
+    "https://www.coindesk.com/tag/venture-capital/",
+    "https://decrypt.co/tag/funding",
+]
+DEFAULT_FUNDING_API_SOURCES = [
+    # Public, no-key: DefiLlama raises
+    "defillama_raises",
+    # Free-keyed: CoinMarketCal events (disabled if no key)
+    "coinmarketcal_events",
+]
+
+# GitHub input defaults
+DEFAULT_GITHUB_QUERIES = [
+    # High-signal OSS activity queries. Users can override via env.
+    "topic:ethereum language:solidity pushed:>2025-01-01",
+    "topic:layer-2 language:solidity pushed:>2025-01-01",
+    "topic:defi language:solidity pushed:>2025-01-01",
+    "topic:zk language:rust pushed:>2025-01-01",
+]
+
 def _env_bool(name: str, default: bool=False) -> bool:
     v = os.getenv(name)
     if v is None:
         return default
     return v.strip().lower() in {"1","true","yes","y","on"}
+
+
+def _env_csv(name: str) -> list[str] | None:
+    """Parse a comma-separated env var.
+
+    Returns None if the env var is unset OR empty/whitespace (meaning: no override).
+    """
+    v = os.getenv(name)
+    if v is None:
+        return None
+    v = v.strip()
+    if not v:
+        return None
+    return [s.strip() for s in v.split(",") if s.strip()]
+
+
+def _merge_sources(defaults: list[str], override: list[str] | None, extra: list[str] | None) -> list[str]:
+    """Compatibility-first merge for ingestion sources."""
+    base = list(override) if override is not None else list(defaults)
+    if extra:
+        seen = set(base)
+        for s in extra:
+            if s not in seen:
+                base.append(s)
+                seen.add(s)
+    return base
 
 def load_config() -> Dict[str, Any]:
     with open(DEFAULT_SETTINGS_PATH, "r", encoding="utf-8") as f:
@@ -33,17 +120,101 @@ def load_config() -> Dict[str, Any]:
 
     config.setdefault("ingestion", {})
     config["ingestion"]["twitter_mode"] = os.getenv("TWITTER_MODE", config["ingestion"].get("twitter_mode", "none")).lower()
-    news_sources_env = os.getenv("NEWS_SOURCES", "")
-    config["ingestion"]["news_sources"] = [s.strip() for s in news_sources_env.split(",") if s.strip()]
 
-    twitter_rss_env = os.getenv("TWITTER_RSS_SOURCES", "")
-    config["ingestion"]["twitter_rss_sources"] = [s.strip() for s in twitter_rss_env.split(",") if s.strip()]
+    # -----------------------------
+    # Ingestion source configuration
+    # -----------------------------
+    # Back-compat: NEWS_SOURCES is treated as an RSS override for news.
+    config["ingestion"]["news_sources"] = _merge_sources(
+        DEFAULT_NEWS_RSS_SOURCES,
+        _env_csv("NEWS_SOURCES"),
+        _env_csv("NEWS_RSS_EXTRA_SOURCES"),
+    )
+    config["ingestion"]["news_web_sources"] = _merge_sources(
+        DEFAULT_NEWS_WEB_SOURCES,
+        _env_csv("NEWS_WEB_SOURCES"),
+        _env_csv("NEWS_WEB_EXTRA_SOURCES"),
+    )
+    config["ingestion"]["news_api_sources"] = _merge_sources(
+        DEFAULT_NEWS_API_SOURCES,
+        _env_csv("NEWS_API_SOURCES"),
+        _env_csv("NEWS_API_EXTRA_SOURCES"),
+    )
+
+    config["ingestion"]["ecosystem_rss_sources"] = _merge_sources(
+        DEFAULT_ECOSYSTEM_RSS_SOURCES,
+        _env_csv("ECOSYSTEM_RSS_SOURCES"),
+        _env_csv("ECOSYSTEM_RSS_EXTRA_SOURCES"),
+    )
+    config["ingestion"]["ecosystem_web_sources"] = _merge_sources(
+        DEFAULT_ECOSYSTEM_WEB_SOURCES,
+        _env_csv("ECOSYSTEM_WEB_SOURCES"),
+        _env_csv("ECOSYSTEM_WEB_EXTRA_SOURCES"),
+    )
+    config["ingestion"]["ecosystem_api_sources"] = _merge_sources(
+        DEFAULT_ECOSYSTEM_API_SOURCES,
+        _env_csv("ECOSYSTEM_API_SOURCES"),
+        _env_csv("ECOSYSTEM_API_EXTRA_SOURCES"),
+    )
+
+    # Snapshot governance spaces (used by ecosystem API ingestion)
+    default_spaces = [
+        "arbitrum",
+        "opcollective.eth",
+        "aave.eth",
+        "uniswap",
+        "starknet",
+        "polygon",
+        "zksync",
+        "scroll",
+        "base",
+    ]
+    config["ingestion"]["snapshot_spaces"] = _merge_sources(
+        default_spaces,
+        _env_csv("ECOSYSTEM_SNAPSHOT_SPACES"),
+        _env_csv("ECOSYSTEM_SNAPSHOT_EXTRA_SPACES"),
+    )
+
+    config["ingestion"]["funding_rss_sources"] = _merge_sources(
+        DEFAULT_FUNDING_RSS_SOURCES,
+        _env_csv("FUNDING_RSS_SOURCES"),
+        _env_csv("FUNDING_RSS_EXTRA_SOURCES"),
+    )
+    config["ingestion"]["funding_web_sources"] = _merge_sources(
+        DEFAULT_FUNDING_WEB_SOURCES,
+        _env_csv("FUNDING_WEB_SOURCES"),
+        _env_csv("FUNDING_WEB_EXTRA_SOURCES"),
+    )
+    config["ingestion"]["funding_api_sources"] = _merge_sources(
+        DEFAULT_FUNDING_API_SOURCES,
+        _env_csv("FUNDING_API_SOURCES"),
+        _env_csv("FUNDING_API_EXTRA_SOURCES"),
+    )
+
+    # Twitter RSS sources
+    config["ingestion"]["twitter_rss_sources"] = _merge_sources(
+        config["ingestion"].get("twitter_rss_sources", []),
+        _env_csv("TWITTER_RSS_SOURCES"),
+        _env_csv("TWITTER_RSS_EXTRA_SOURCES"),
+    )
+
+    # GitHub inputs (still a platform integration, but configurable)
+    config.setdefault("github", {})
+    config["github"].setdefault("queries", DEFAULT_GITHUB_QUERIES)
+    config["github"]["queries"] = _merge_sources(
+        config["github"]["queries"],
+        _env_csv("GITHUB_QUERIES"),
+        _env_csv("GITHUB_EXTRA_QUERIES"),
+    )
 
     config["keys"] = {
         "openai": os.getenv("OPENAI_API_KEY"),
         "anthropic": os.getenv("ANTHROPIC_API_KEY"),
         "twitter_bearer": os.getenv("TWITTER_BEARER_TOKEN"),
         "github_token": os.getenv("GITHUB_TOKEN"),
+        # Optional free-keyed APIs (ingestion skips gracefully if missing)
+        "coinmarketcap": os.getenv("COINMARKETCAP_API_KEY"),
+        "coinmarketcal": os.getenv("COINMARKETCAL_API_KEY"),
     }
 
     config["dry_mode"] = _env_bool("DRY_MODE", False)

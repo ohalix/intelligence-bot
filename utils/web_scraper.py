@@ -88,7 +88,12 @@ async def fetch_cached_html(
         if sleep_for:
             await asyncio.sleep(sleep_for)
 
-        content = await fetch_text(session, url)
+        headers = {
+            # Keep UA simple and honest; no bypass intent.
+            "User-Agent": "Mozilla/5.0 (compatible; IntelBot/1.0; +https://example.com/bot)",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        }
+        content = await fetch_text(session, url, headers=headers)
         _DOMAIN_LAST_TS[domain] = time.time()
 
     _write_cache(url, content)
