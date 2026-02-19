@@ -58,8 +58,19 @@ def rolling_since(config: Dict[str, Any], store: SQLiteStore) -> datetime:
         return last
     return datetime.utcnow() - timedelta(hours=hours)
 
-async def run_pipeline(config: Dict[str, Any], store: SQLiteStore, manual: bool=False) -> Dict[str, Any]:
-    since = rolling_since(config, store)
+async def run_pipeline(
+    config: Dict[str, Any],
+    store: SQLiteStore,
+    manual: bool = False,
+    since_override: datetime | None = None,
+) -> Dict[str, Any]:
+    """Run the full ingestion + processing pipeline.
+
+    Compatibility-first: existing callers can keep using (config, store, manual).
+    - since_override: if provided, forces the ingestion window start.
+    """
+
+    since = since_override if since_override is not None else rolling_since(config, store)
     logger.info(f"Pipeline start. since={since.isoformat()} manual={manual}")
 
     raw: List[Dict[str, Any]] = []
@@ -159,14 +170,6 @@ async def send_dailybrief(config: Dict[str, Any], store: SQLiteStore, bot) -> No
         return
     payload = build_daily_payload(config, store, include_sections=True)
     payload["analysis"] = await compute_analysis(config, payload)
-    # Prefer Telegram HTML for robustness (avoids MarkdownV2 entity parse failures).
-    from telegram.constants import ParseMode
-    from bot.formatter import format_dailybrief_html
-
-    msg = format_dailybrief_html(payload)
-    await bot.send_message(
-        chat_id=chat_id,
-        text=msg,
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
-    )
+    from bot.formatter import format_dailybrief
+    msg = format_dailybrief(payload)
+    await bot.send_message(chat_id=chat_id, text=msg, parse_mode="MarkdownV2", disable_web_page_preview=True)
