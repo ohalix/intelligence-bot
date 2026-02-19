@@ -13,12 +13,11 @@ from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
 from engine.pipeline import build_daily_payload
+from engine.pipeline import run_pipeline
 from storage.sqlite_store import SQLiteStore
 from .formatter import (
     format_dailybrief,
     format_dailybrief_html,
-    format_section_html,
-    escape_html,
 )
 
 log = logging.getLogger(__name__)
@@ -202,123 +201,136 @@ async def cmd_rawsignals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     store: SQLiteStore = context.application.bot_data.get("store")
     cfg = context.application.bot_data.get("config")
 
-    # Raw signals should be maximally robust (no entity parse failures).
-    # Use HTML formatting consistently.
-    since_hours = int(cfg.get("storage", {}).get("rolling_window_hours", 24))
-    limit = int(cfg.get("analysis", {}).get("top_signals_to_analyze", 10))
-    from datetime import datetime, timedelta
-
-    since = datetime.utcnow() - timedelta(hours=since_hours)
-    signals = store.get_signals_since(since, None, limit=max(25, limit * 3))
-    msg = format_section_html("Raw Signals", list(signals))
-
+    payload = build_daily_payload(cfg, store)
+    # Raw view uses MarkdownV2 for brevity; safe reply will fallback.
     await _safe_reply(
         update,
         context,
-        msg,
-        parse_mode=ParseMode.HTML,
+        format_dailybrief(payload),
+        parse_mode=ParseMode.MARKDOWN_V2,
         disable_web_page_preview=True,
     )
 
 
 # Aliases: keep existing command names if the router maps them.
 async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    store: SQLiteStore = context.application.bot_data.get("store")
-    cfg = context.application.bot_data.get("config")
-    from datetime import datetime, timedelta
-
-    since = datetime.utcnow() - timedelta(hours=int(cfg.get("storage", {}).get("rolling_window_hours", 24)))
-    limit = int(cfg.get("analysis", {}).get("top_signals_to_analyze", 10))
-    signals = store.get_signals_since(since, "news", limit=limit)
-    await _safe_reply(
-        update,
-        context,
-        format_section_html("News", list(signals)),
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
-    )
+    await cmd_dailybrief(update, context)
 
 
 async def cmd_trends(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # Trends are computed from the top signals in the rolling window.
-    store: SQLiteStore = context.application.bot_data.get("store")
-    cfg = context.application.bot_data.get("config")
-    from datetime import datetime, timedelta
-    from intelligence.trend_detector import TrendDetector
-
-    since = datetime.utcnow() - timedelta(hours=int(cfg.get("storage", {}).get("rolling_window_hours", 24)))
-    limit = int(cfg.get("analysis", {}).get("top_signals_to_analyze", 10))
-    all_signals = store.get_signals_since(since, None, limit=limit)
-    trends = TrendDetector().detect(list(all_signals))
-
-    lines: list[str] = ["<b>Trends</b>"]
-    if not trends:
-        lines.append("<i>No trends detected in the last 24h.</i>")
-    else:
-        for t in trends[:20]:
-            lines.append(f"• {escape_html(str(t))}")
-
-    await _safe_reply(
-        update,
-        context,
-        "\n".join(lines).strip(),
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
-    )
+    await cmd_dailybrief(update, context)
 
 
 async def cmd_funding(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    store: SQLiteStore = context.application.bot_data.get("store")
-    cfg = context.application.bot_data.get("config")
-    from datetime import datetime, timedelta
-
-    since = datetime.utcnow() - timedelta(hours=int(cfg.get("storage", {}).get("rolling_window_hours", 24)))
-    limit = int(cfg.get("analysis", {}).get("top_signals_to_analyze", 10))
-    signals = store.get_signals_since(since, "funding", limit=limit)
-    await _safe_reply(
-        update,
-        context,
-        format_section_html("Funding", list(signals)),
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
-    )
+    await cmd_dailybrief(update, context)
 
 
 async def cmd_github(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    store: SQLiteStore = context.application.bot_data.get("store")
-    cfg = context.application.bot_data.get("config")
-    from datetime import datetime, timedelta
-
-    since = datetime.utcnow() - timedelta(hours=int(cfg.get("storage", {}).get("rolling_window_hours", 24)))
-    limit = int(cfg.get("analysis", {}).get("top_signals_to_analyze", 10))
-    signals = store.get_signals_since(since, "github", limit=limit)
-    await _safe_reply(
-        update,
-        context,
-        format_section_html("GitHub", list(signals)),
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
-    )
+    await cmd_dailybrief(update, context)
 
 
 async def cmd_newprojects(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    # New projects: twitter + github signals combined.
+    await cmd_dailybrief(update, context)
+
+
+def _manual_run_meta_key_utc() -> str:
+    """Key used to persist manual /run counts in SQLite meta.
+
+    Uses UTC date to be consistent across deployments.
+    """
+
+    from datetime import datetime
+
+    return f"manual_run_count:{datetime.utcnow().strftime('%Y-%m-%d')}"
+
+
+def _get_manual_run_count(store: SQLiteStore) -> int:
+    try:
+        v = store.get_meta(_manual_run_meta_key_utc())
+        return int(v) if v is not None else 0
+    except Exception:
+        return 0
+
+
+def _set_manual_run_count(store: SQLiteStore, count: int) -> None:
+    store.set_meta(_manual_run_meta_key_utc(), str(int(count)))
+
+
+async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Manual pipeline trigger (rate-limited, persisted).
+
+    - Max 5 per UTC day
+    - Persists across restarts using SQLite meta
+    - Uses an in-process lock to prevent concurrent runs
+    """
+
     store: SQLiteStore = context.application.bot_data.get("store")
     cfg = context.application.bot_data.get("config")
+
+    # Concurrency guard
+    lock: asyncio.Lock | None = context.application.bot_data.get("pipeline_lock")
+    if lock is None:
+        lock = asyncio.Lock()
+        context.application.bot_data["pipeline_lock"] = lock
+
+    if lock.locked():
+        await _safe_reply(
+            update,
+            context,
+            "Pipeline already running, try again shortly.",
+            parse_mode=None,
+            disable_web_page_preview=True,
+        )
+        return
+
+    # Daily limit
+    MAX_PER_DAY = 5
+    count = _get_manual_run_count(store)
+    remaining = max(0, MAX_PER_DAY - count)
+    if remaining <= 0:
+        log.info("Manual /run blocked: limit reached")
+        await _safe_reply(
+            update,
+            context,
+            "Manual runs limit reached (5/day). Try again tomorrow.",
+            parse_mode=None,
+            disable_web_page_preview=True,
+        )
+        return
+
     from datetime import datetime, timedelta
 
-    since = datetime.utcnow() - timedelta(hours=int(cfg.get("storage", {}).get("rolling_window_hours", 24)))
-    limit = int(cfg.get("analysis", {}).get("top_signals_to_analyze", 10))
-    twitter = store.get_signals_since(since, "twitter", limit=limit)
-    github = store.get_signals_since(since, "github", limit=limit)
-    signals = list(twitter) + list(github)
-    await _safe_reply(
-        update,
-        context,
-        format_section_html("New Projects", signals[:limit]),
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
-    )
+    since = datetime.utcnow() - timedelta(hours=24)
+    log.info("Manual /run triggered: since=%s remaining_runs=%s", since.isoformat(), remaining - 1)
+
+    # Reserve a slot before running (prevents double-spend if the process crashes mid-run).
+    try:
+        _set_manual_run_count(store, count + 1)
+    except Exception:
+        # If persistence fails, we still run, but log it.
+        log.exception("Failed to persist manual run count")
+
+    try:
+        async with lock:
+            result = await run_pipeline(cfg, store, manual=True, since_override=since)
+        inserted = result.get("inserted", 0)
+        total_seen = result.get("count", 0)
+        await _safe_reply(
+            update,
+            context,
+            f"✅ Pipeline run complete (last 24h). inserted={inserted} total_seen={total_seen}. Remaining today: {max(0, MAX_PER_DAY - (count + 1))}",
+            parse_mode=None,
+            disable_web_page_preview=True,
+        )
+    except Exception as e:
+        log.exception("Manual /run failed")
+        await _safe_reply(
+            update,
+            context,
+            f"⚠️ Pipeline run failed: {e}",
+            parse_mode=None,
+            disable_web_page_preview=True,
+        )
 
 
 def _read_sources_from_module(mod_path: str, candidates: list[str]) -> tuple[str, list[str]]:
