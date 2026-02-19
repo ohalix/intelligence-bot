@@ -35,8 +35,36 @@ async def news_from_cryptocurrency_cv(session: aiohttp.ClientSession, since: dat
         logger.warning("cryptocurrency.cv fetch failed: %s", e)
         return []
 
+    # Some responses can be unexpected (e.g., JSON string or error dict). Guard hard.
+    if isinstance(data, str):
+        logger.warning(
+            "cryptocurrency.cv returned unexpected payload type=str; skipping. preview=%r",
+            data[:120],
+        )
+        return []
+    if data is None:
+        return []
+    if isinstance(data, dict):
+        maybe = data.get("data") or data.get("results")
+        if isinstance(maybe, list):
+            data = maybe
+        else:
+            logger.warning(
+                "cryptocurrency.cv returned unexpected payload type=dict keys=%s; skipping",
+                list(data.keys())[:10],
+            )
+            return []
+    if not isinstance(data, list):
+        logger.warning(
+            "cryptocurrency.cv returned unexpected payload type=%s; skipping",
+            type(data).__name__,
+        )
+        return []
+
     items: List[Dict[str, Any]] = []
-    for it in (data or []):
+    for it in data:
+        if not isinstance(it, dict):
+            continue
         # Observed fields: title, url, source, created_at/updated_at (varies)
         published_at = _iso_or_none(it.get("published_at")) or _iso_or_none(it.get("created_at")) or _iso_or_none(it.get("updated_at"))
         if not published_at:
@@ -104,17 +132,55 @@ async def news_from_coinmarketcap_posts_latest(session: aiohttp.ClientSession, s
 
 
 async def funding_from_defillama_raises(session: aiohttp.ClientSession, since: datetime) -> List[Dict[str, Any]]:
-    """DefiLlama raises endpoint (no key required)."""
-    url = "https://pro-api.llama.fi/api/raises"
-    try:
-        data = await fetch_json(session, url)
-    except Exception as e:
-        logger.warning("DefiLlama raises fetch failed: %s", e)
+    """DefiLlama raises endpoint (no key required).
+
+    DefiLlama maintains both an open API and a pro API. Some deployments return
+    a 404 with a routing error message for unknown paths; to reduce failures we
+    try the open endpoint first, then fall back.
+    """
+    urls = [
+        "https://api.llama.fi/raises",
+        "https://pro-api.llama.fi/api/raises",
+    ]
+
+    data: Any = None
+    last_err: Optional[Exception] = None
+    for url in urls:
+        try:
+            data = await fetch_json(session, url)
+            break
+        except Exception as e:
+            last_err = e
+            continue
+
+    if data is None:
+        if last_err is not None:
+            logger.warning("DefiLlama raises fetch failed: %s", last_err)
         return []
 
-    raises = (data or {}).get("raises") or data or []
+    # Expected: either {"raises": [...]} or a list.
+    if isinstance(data, str):
+        logger.warning("DefiLlama raises returned unexpected payload type=str; skipping")
+        return []
+    if isinstance(data, dict):
+        if any(k in data for k in ("error", "message")):
+            logger.warning("DefiLlama raises returned error payload: %s", str(data)[:200])
+            return []
+        raises = data.get("raises") or data.get("data") or data.get("results") or []
+    else:
+        raises = data
+
+    if not isinstance(raises, list):
+        logger.warning(
+            "DefiLlama raises returned unexpected payload type=%s; skipping",
+            type(raises).__name__,
+        )
+        return []
+
     items: List[Dict[str, Any]] = []
     for r in raises:
+        if not isinstance(r, dict):
+            continue
         # fields vary; commonly include date or announcedAt
         published_at = _iso_or_none(r.get("date")) or _iso_or_none(r.get("announcedAt"))
         if not published_at:

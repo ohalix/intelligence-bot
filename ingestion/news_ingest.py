@@ -20,7 +20,9 @@ DEFAULT_NEWS_WEB_PAGES = [
     "https://decrypt.co/news",
     "https://www.coindesk.com/",
 ]
-DEFAULT_NEWS_API_SOURCES = ["cryptocurrency_cv", "coinmarketcap_posts_latest"]
+# CoinMarketCap's content endpoints can be restricted depending on the free plan.
+# Keep it available via config/env, but do not call by default.
+DEFAULT_NEWS_API_SOURCES = ["cryptocurrency_cv"]
 
 
 class NewsIngester:
