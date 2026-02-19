@@ -17,6 +17,8 @@ from storage.sqlite_store import SQLiteStore
 from .formatter import (
     format_dailybrief,
     format_dailybrief_html,
+    format_section_html,
+    escape_html,
 )
 
 log = logging.getLogger(__name__)
@@ -200,36 +202,123 @@ async def cmd_rawsignals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     store: SQLiteStore = context.application.bot_data.get("store")
     cfg = context.application.bot_data.get("config")
 
-    payload = build_daily_payload(cfg, store)
-    # Raw view uses MarkdownV2 for brevity; safe reply will fallback.
+    # Raw signals should be maximally robust (no entity parse failures).
+    # Use HTML formatting consistently.
+    since_hours = int(cfg.get("storage", {}).get("rolling_window_hours", 24))
+    limit = int(cfg.get("analysis", {}).get("top_signals_to_analyze", 10))
+    from datetime import datetime, timedelta
+
+    since = datetime.utcnow() - timedelta(hours=since_hours)
+    signals = store.get_signals_since(since, None, limit=max(25, limit * 3))
+    msg = format_section_html("Raw Signals", list(signals))
+
     await _safe_reply(
         update,
         context,
-        format_dailybrief(payload),
-        parse_mode=ParseMode.MARKDOWN_V2,
+        msg,
+        parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
     )
 
 
 # Aliases: keep existing command names if the router maps them.
 async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await cmd_dailybrief(update, context)
+    store: SQLiteStore = context.application.bot_data.get("store")
+    cfg = context.application.bot_data.get("config")
+    from datetime import datetime, timedelta
+
+    since = datetime.utcnow() - timedelta(hours=int(cfg.get("storage", {}).get("rolling_window_hours", 24)))
+    limit = int(cfg.get("analysis", {}).get("top_signals_to_analyze", 10))
+    signals = store.get_signals_since(since, "news", limit=limit)
+    await _safe_reply(
+        update,
+        context,
+        format_section_html("News", list(signals)),
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+    )
 
 
 async def cmd_trends(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await cmd_dailybrief(update, context)
+    # Trends are computed from the top signals in the rolling window.
+    store: SQLiteStore = context.application.bot_data.get("store")
+    cfg = context.application.bot_data.get("config")
+    from datetime import datetime, timedelta
+    from intelligence.trend_detector import TrendDetector
+
+    since = datetime.utcnow() - timedelta(hours=int(cfg.get("storage", {}).get("rolling_window_hours", 24)))
+    limit = int(cfg.get("analysis", {}).get("top_signals_to_analyze", 10))
+    all_signals = store.get_signals_since(since, None, limit=limit)
+    trends = TrendDetector().detect(list(all_signals))
+
+    lines: list[str] = ["<b>Trends</b>"]
+    if not trends:
+        lines.append("<i>No trends detected in the last 24h.</i>")
+    else:
+        for t in trends[:20]:
+            lines.append(f"• {escape_html(str(t))}")
+
+    await _safe_reply(
+        update,
+        context,
+        "\n".join(lines).strip(),
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+    )
 
 
 async def cmd_funding(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await cmd_dailybrief(update, context)
+    store: SQLiteStore = context.application.bot_data.get("store")
+    cfg = context.application.bot_data.get("config")
+    from datetime import datetime, timedelta
+
+    since = datetime.utcnow() - timedelta(hours=int(cfg.get("storage", {}).get("rolling_window_hours", 24)))
+    limit = int(cfg.get("analysis", {}).get("top_signals_to_analyze", 10))
+    signals = store.get_signals_since(since, "funding", limit=limit)
+    await _safe_reply(
+        update,
+        context,
+        format_section_html("Funding", list(signals)),
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+    )
 
 
 async def cmd_github(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await cmd_dailybrief(update, context)
+    store: SQLiteStore = context.application.bot_data.get("store")
+    cfg = context.application.bot_data.get("config")
+    from datetime import datetime, timedelta
+
+    since = datetime.utcnow() - timedelta(hours=int(cfg.get("storage", {}).get("rolling_window_hours", 24)))
+    limit = int(cfg.get("analysis", {}).get("top_signals_to_analyze", 10))
+    signals = store.get_signals_since(since, "github", limit=limit)
+    await _safe_reply(
+        update,
+        context,
+        format_section_html("GitHub", list(signals)),
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+    )
 
 
 async def cmd_newprojects(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await cmd_dailybrief(update, context)
+    # New projects: twitter + github signals combined.
+    store: SQLiteStore = context.application.bot_data.get("store")
+    cfg = context.application.bot_data.get("config")
+    from datetime import datetime, timedelta
+
+    since = datetime.utcnow() - timedelta(hours=int(cfg.get("storage", {}).get("rolling_window_hours", 24)))
+    limit = int(cfg.get("analysis", {}).get("top_signals_to_analyze", 10))
+    twitter = store.get_signals_since(since, "twitter", limit=limit)
+    github = store.get_signals_since(since, "github", limit=limit)
+    signals = list(twitter) + list(github)
+    await _safe_reply(
+        update,
+        context,
+        format_section_html("New Projects", signals[:limit]),
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+    )
 
 
 def _read_sources_from_module(mod_path: str, candidates: list[str]) -> tuple[str, list[str]]:
