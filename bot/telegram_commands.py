@@ -1,194 +1,230 @@
+from __future__ import annotations
+
+import asyncio
 import logging
-from datetime import datetime, timedelta
-from typing import Any, Dict
+import re
+from typing import Optional
 
 from telegram import Update
+from telegram.constants import ParseMode
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
-from bot.formatter import (
-    escape_html,
-    format_dailybrief_html,
-    format_section_html,
-)
-from engine.pipeline import run_pipeline
+from engine.pipeline import build_daily_payload
 from storage.sqlite_store import SQLiteStore
+from .formatter import (
+    format_dailybrief,
+    format_dailybrief_html,
+)
 
-# Conservative fallback: some repos drifted and this symbol was renamed.
-try:
-    from engine.pipeline import build_daily_payload
-except ImportError:  # pragma: no cover
-    from engine.pipeline import build_daily_brief_payload as build_daily_payload
+log = logging.getLogger(__name__)
 
-# Optional: source discovery command
-try:
-    from discovery.source_discovery import discover_sources
-except Exception:  # pragma: no cover
-    discover_sources = None
-
-logger = logging.getLogger(__name__)
+# Telegram hard limit is 4096 characters for a message.
+# Use a conservative limit to avoid edge cases with entities.
+SAFE_MSG_LIMIT = 3800
 
 
-def _since(config: Dict[str, Any]) -> datetime:
-    hours = int(config.get("storage", {}).get("rolling_window_hours", 24))
-    return datetime.utcnow() - timedelta(hours=hours)
+def _strip_html(text: str) -> str:
+    # Very small helper: Telegram HTML supports only a subset; stripping for plain fallback.
+    return re.sub(r"<[^>]+>", "", text)
 
 
-async def _safe_reply(update: Update, text: str, *, parse_mode: str | None) -> None:
-    """Send message with a hard fallback to plain text (never crash handler)."""
-    if not update.message:
+def _chunk_text(text: str, limit: int = SAFE_MSG_LIMIT) -> list[str]:
+    """Split text into chunks <= limit.
+
+    Strategy:
+    - Prefer splitting on double newlines (section boundaries)
+    - Then single newlines
+    - Then spaces
+    - Finally hard cut
+
+    This works well for our HTML formatter because tags are closed inside each block.
+    """
+    if len(text) <= limit:
+        return [text]
+
+    seps = ["\n\n", "\n", " "]
+    chunks: list[str] = []
+    remaining = text
+
+    while remaining:
+        if len(remaining) <= limit:
+            chunks.append(remaining)
+            break
+
+        cut = -1
+        for sep in seps:
+            cut = remaining.rfind(sep, 0, limit)
+            if cut > 0:
+                cut = cut + len(sep)
+                break
+        if cut <= 0:
+            cut = limit
+
+        chunk = remaining[:cut].rstrip()
+        if chunk:
+            chunks.append(chunk)
+        remaining = remaining[cut:].lstrip()
+
+    return chunks
+
+
+async def _send_chunks(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+    parse_mode: Optional[str],
+    disable_web_page_preview: bool,
+) -> None:
+    chunks = _chunk_text(text, SAFE_MSG_LIMIT)
+    log.info(
+        "Telegram chunking: len=%s chunks=%s parse_mode=%s",
+        len(text),
+        len(chunks),
+        parse_mode,
+    )
+
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    if chat_id is None:
+        # Should never happen in real bot usage.
         return
-    preview = text.replace("\n", " ")[:200]
+
+    # First chunk as a reply (keeps context). Subsequent chunks as normal messages.
+    for i, chunk in enumerate(chunks):
+        if i == 0 and update.message is not None:
+            await update.message.reply_text(
+                chunk,
+                parse_mode=parse_mode,
+                disable_web_page_preview=disable_web_page_preview,
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=chunk,
+                parse_mode=parse_mode,
+                disable_web_page_preview=disable_web_page_preview,
+            )
+        # Tiny delay to be polite and avoid burst issues.
+        if len(chunks) > 1:
+            await asyncio.sleep(0.05)
+
+
+async def _safe_reply(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    text: str,
+    parse_mode: Optional[str] = None,
+    disable_web_page_preview: bool = True,
+) -> None:
+    """Send a message with guaranteed delivery.
+
+    Order:
+    1) Try send as a single message.
+    2) If "Message is too long" => chunk and send.
+    3) If entity parse fails (HTML/Markdown) => retry once as plain text (chunked if needed).
+
+    This function must never raise and must not crash handlers.
+    """
     try:
+        if update.message is None:
+            return
         await update.message.reply_text(
             text,
             parse_mode=parse_mode,
-            disable_web_page_preview=True,
+            disable_web_page_preview=disable_web_page_preview,
         )
+        return
     except BadRequest as e:
-        logger.warning(
-            "Telegram send failed; retrying as plain text. err=%s preview=%r",
-            str(e),
-            preview,
+        err = str(e)
+        preview = text[:200].replace("\n", " ")
+        log.warning(
+            "Telegram send failed; attempting recovery. err=%s preview=%r", err, preview
         )
-        await update.message.reply_text(
-            escape_html(text) if parse_mode == "HTML" else text,
-            parse_mode=None,
-            disable_web_page_preview=True,
-        )
+
+        # Chunking for message-too-long.
+        if "Message is too long" in err:
+            try:
+                await _send_chunks(
+                    update,
+                    context,
+                    text,
+                    parse_mode=parse_mode,
+                    disable_web_page_preview=disable_web_page_preview,
+                )
+                return
+            except BadRequest as e2:
+                # If chunking still fails due to parse mode, fall through to plain text.
+                log.warning("Chunked send failed; falling back to plain text. err=%s", e2)
+
+        # Parse errors or chunking failures: retry plain text, still chunked.
+        try:
+            plain = _strip_html(text) if (parse_mode == ParseMode.HTML) else text
+            await _send_chunks(
+                update,
+                context,
+                plain,
+                parse_mode=None,
+                disable_web_page_preview=disable_web_page_preview,
+            )
+        except Exception as e3:
+            # Absolute last resort: send a minimal error note.
+            log.exception("Telegram recovery failed: %s", e3)
+            if update.message is not None:
+                await update.message.reply_text(
+                    "Output was too large to deliver completely. Please use /rawsignals with a smaller window.",
+                    parse_mode=None,
+                    disable_web_page_preview=True,
+                )
 
 
 async def cmd_dailybrief(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    cfg = context.bot_data["config"]
-    store: SQLiteStore = context.bot_data["store"]
+    store: SQLiteStore = context.application.bot_data.get("store")
+    cfg = context.application.bot_data.get("config")
 
-    await run_pipeline(cfg, store, manual=True)
     payload = build_daily_payload(cfg, store)
 
-    # Use HTML for robust, clean rendering.
-    await _safe_reply(update, format_dailybrief_html(payload), parse_mode="HTML")
-
-
-async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    cfg = context.bot_data["config"]
-    store: SQLiteStore = context.bot_data["store"]
-    signals = store.get_signals_since(
-        _since(cfg),
-        source="news",
-        limit=cfg["analysis"]["top_signals_to_analyze"],
+    # Prefer HTML for robustness; fallback is handled in _safe_reply.
+    await _safe_reply(
+        update,
+        context,
+        format_dailybrief_html(payload),
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
     )
-    await _safe_reply(update, format_section_html("News", signals), parse_mode="HTML")
 
 
-async def cmd_newprojects(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    cfg = context.bot_data["config"]
-    store: SQLiteStore = context.bot_data["store"]
+# Backwards-compatible: keep /rawsignals simple.
+async def cmd_rawsignals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    store: SQLiteStore = context.application.bot_data.get("store")
+    cfg = context.application.bot_data.get("config")
 
-    tw = store.get_signals_since(_since(cfg), source="twitter", limit=10)
-    gh = store.get_signals_since(_since(cfg), source="github", limit=10)
-    combined = (tw + gh)[: cfg["analysis"]["top_signals_to_analyze"]]
+    payload = build_daily_payload(cfg, store)
+    # Raw view uses MarkdownV2 for brevity; safe reply will fallback.
+    await _safe_reply(
+        update,
+        context,
+        format_dailybrief(payload),
+        parse_mode=ParseMode.MARKDOWN_V2,
+        disable_web_page_preview=True,
+    )
 
-    await _safe_reply(update, format_section_html("New Projects", combined), parse_mode="HTML")
+
+# Aliases: keep existing command names if the router maps them.
+async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await cmd_dailybrief(update, context)
 
 
 async def cmd_trends(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    cfg = context.bot_data["config"]
-    store: SQLiteStore = context.bot_data["store"]
-
-    payload = build_daily_payload(cfg, store, include_sections=False)
-    analysis = payload.get("analysis", {})
-
-    mt = analysis.get("market_tone", {})
-    tone = escape_html(str(mt.get("market_tone", "neutral")))
-    conf = escape_html(str(mt.get("confidence", 0)))
-
-    lines = [
-        "<b>Trends & Market Tone</b>",
-        f"<i>Tone:</i> <b>{tone}</b> <i>(conf {conf})</i>",
-        "",
-    ]
-
-    narr = analysis.get("narratives") or []
-    if narr:
-        lines.append("<b>Narrative clusters</b>")
-        for n in narr[:6]:
-            chain = escape_html(str(n.get("chain", "unknown")))
-            sector = escape_html(str(n.get("sector", "unknown")))
-            count = escape_html(str(n.get("count", 0)))
-            lines.append(f"• <code>{chain}/{sector}</code>: {count}")
-    else:
-        lines.append("<i>No narratives computed.</i>")
-
-    await _safe_reply(update, "\n".join(lines), parse_mode="HTML")
+    await cmd_dailybrief(update, context)
 
 
 async def cmd_funding(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    cfg = context.bot_data["config"]
-    store: SQLiteStore = context.bot_data["store"]
-    signals = store.get_signals_since(
-        _since(cfg),
-        source="funding",
-        limit=cfg["analysis"]["top_signals_to_analyze"],
-    )
-    await _safe_reply(update, format_section_html("Funding", signals), parse_mode="HTML")
+    await cmd_dailybrief(update, context)
 
 
 async def cmd_github(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    cfg = context.bot_data["config"]
-    store: SQLiteStore = context.bot_data["store"]
-    signals = store.get_signals_since(
-        _since(cfg),
-        source="github",
-        limit=cfg["analysis"]["top_signals_to_analyze"],
-    )
-    await _safe_reply(update, format_section_html("GitHub", signals), parse_mode="HTML")
+    await cmd_dailybrief(update, context)
 
 
-async def cmd_rawsignals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    cfg = context.bot_data["config"]
-    store: SQLiteStore = context.bot_data["store"]
-    signals = store.get_signals_since(
-        _since(cfg),
-        source=None,
-        limit=cfg["analysis"]["top_signals_to_analyze"],
-    )
-    await _safe_reply(update, format_section_html("Raw Signals", signals), parse_mode="HTML")
-
-
-async def cmd_sources(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Suggest up to 5 new sources when discovery finds enough candidates."""
-    if discover_sources is None:
-        await _safe_reply(update, "Source discovery is not available in this build.", parse_mode=None)
-        return
-
-    cfg = context.bot_data["config"]
-    suggestions = discover_sources(cfg)
-
-    if len(suggestions) < 5:
-        await _safe_reply(
-            update,
-            f"Found {len(suggestions)} candidate sources. I will post once we have 5+.",
-            parse_mode=None,
-        )
-        return
-
-    lines = ["<b>New Source Candidates (review)</b>"]
-    for s in suggestions[:5]:
-        lines.append(
-            f"• <b>{escape_html(s['name'])}</b> — <code>{escape_html(s['score'])}</code>\n"
-            f"  <a href=\"{escape_html(s['url'])}\">{escape_html(s['url'])}</a>\n"
-            f"  <i>{escape_html(s['reason'])}</i>"
-        )
-    await _safe_reply(update, "\n".join(lines), parse_mode="HTML")
-
-
-__all__ = [
-    "cmd_dailybrief",
-    "cmd_news",
-    "cmd_newprojects",
-    "cmd_trends",
-    "cmd_funding",
-    "cmd_github",
-    "cmd_rawsignals",
-    "cmd_sources",
-]
+async def cmd_newprojects(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await cmd_dailybrief(update, context)
