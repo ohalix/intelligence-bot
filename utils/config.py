@@ -111,6 +111,9 @@ def load_config() -> Dict[str, Any]:
     config.setdefault("bot", {})
     config["bot"]["telegram_token"] = os.getenv("TELEGRAM_BOT_TOKEN", config["bot"].get("telegram_token"))
     config["bot"]["chat_id"] = os.getenv("TELEGRAM_CHAT_ID", config["bot"].get("chat_id"))
+    # Optional admin chat id for one-time startup notifications.
+    # If unset, startup notice is skipped (must never crash bot).
+    config["bot"]["admin_chat_id"] = os.getenv("ADMIN_CHAT_ID", config["bot"].get("admin_chat_id"))
     config["bot"]["timezone"] = os.getenv("TIMEZONE", config["bot"].get("timezone", "Africa/Lagos"))
 
     config.setdefault("scheduler", {})
