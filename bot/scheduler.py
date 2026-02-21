@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -34,6 +34,14 @@ def start_scheduler(
         except Exception as e:
             logger.exception(f"Scheduled run failed: {e}")
 
-    sched.add_job(job, trigger=IntervalTrigger(hours=interval), next_run_time=datetime.now())
+    # Use timezone-aware UTC to avoid datetime.utcnow deprecation patterns and
+    # reduce misfire warnings. Allow a grace window for missed runs.
+    sched.add_job(
+        job,
+        trigger=IntervalTrigger(hours=interval),
+        next_run_time=datetime.now(timezone.utc),
+        misfire_grace_time=7200,
+        coalesce=True,
+    )
     sched.start()
     return sched
