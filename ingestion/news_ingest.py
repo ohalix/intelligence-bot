@@ -20,8 +20,8 @@ DEFAULT_NEWS_WEB_PAGES = [
     "https://decrypt.co/news",
     "https://www.coindesk.com/",
 ]
-# CoinMarketCap's content endpoints can be restricted depending on the free plan.
-# Keep it available via config/env, but do not call by default.
+# CoinMarketCap content endpoints can be unavailable on free plans (403 "plan doesn't support").
+# Keep it opt-in via NEWS_API_SOURCES / config, not enabled by default.
 DEFAULT_NEWS_API_SOURCES = ["cryptocurrency_cv"]
 
 

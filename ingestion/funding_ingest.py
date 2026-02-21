@@ -19,8 +19,6 @@ DEFAULT_FUNDING_FEEDS = [
 
 DEFAULT_FUNDING_WEB_PAGES = [
     "https://www.coindesk.com/tag/venture-capital/",
-    # Decrypt tag pages are sometimes removed/renamed; keep via env override if desired.
-    # "https://decrypt.co/tag/funding",
 ]
 
 

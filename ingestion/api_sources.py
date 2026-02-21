@@ -35,25 +35,14 @@ async def news_from_cryptocurrency_cv(session: aiohttp.ClientSession, since: dat
         logger.warning("cryptocurrency.cv fetch failed: %s", e)
         return []
 
-    # Some responses can be unexpected (e.g., JSON string or error dict). Guard hard.
+    # The API may return either a list of articles OR an object containing an
+    # "articles" list (as seen in production logs). Guard against unexpected
+    # schemas (including string payloads).
     if isinstance(data, str):
-        logger.warning(
-            "cryptocurrency.cv returned unexpected payload type=str; skipping. preview=%r",
-            data[:120],
-        )
-        return []
-    if data is None:
+        logger.warning("cryptocurrency.cv returned unexpected payload type=str; skipping")
         return []
     if isinstance(data, dict):
-        maybe = data.get("data") or data.get("results")
-        if isinstance(maybe, list):
-            data = maybe
-        else:
-            logger.warning(
-                "cryptocurrency.cv returned unexpected payload type=dict keys=%s; skipping",
-                list(data.keys())[:10],
-            )
-            return []
+        data = data.get("articles") or data.get("data") or data.get("results") or []
     if not isinstance(data, list):
         logger.warning(
             "cryptocurrency.cv returned unexpected payload type=%s; skipping",
@@ -62,7 +51,7 @@ async def news_from_cryptocurrency_cv(session: aiohttp.ClientSession, since: dat
         return []
 
     items: List[Dict[str, Any]] = []
-    for it in data:
+    for it in (data or []):
         if not isinstance(it, dict):
             continue
         # Observed fields: title, url, source, created_at/updated_at (varies)
@@ -132,55 +121,22 @@ async def news_from_coinmarketcap_posts_latest(session: aiohttp.ClientSession, s
 
 
 async def funding_from_defillama_raises(session: aiohttp.ClientSession, since: datetime) -> List[Dict[str, Any]]:
-    """DefiLlama raises endpoint (no key required).
-
-    DefiLlama maintains both an open API and a pro API. Some deployments return
-    a 404 with a routing error message for unknown paths; to reduce failures we
-    try the open endpoint first, then fall back.
-    """
-    urls = [
-        "https://api.llama.fi/raises",
-        "https://pro-api.llama.fi/api/raises",
-    ]
-
-    data: Any = None
-    last_err: Optional[Exception] = None
-    for url in urls:
-        try:
-            data = await fetch_json(session, url)
-            break
-        except Exception as e:
-            last_err = e
-            continue
-
-    if data is None:
-        if last_err is not None:
-            logger.warning("DefiLlama raises fetch failed: %s", last_err)
+    """DefiLlama raises endpoint (no key required)."""
+    # Use the public open API endpoint. The pro-api path in older configs can
+    # return a 404 with a router message.
+    url = "https://api.llama.fi/raises"
+    try:
+        data = await fetch_json(session, url)
+    except Exception as e:
+        logger.warning("DefiLlama raises fetch failed: %s", e)
         return []
 
-    # Expected: either {"raises": [...]} or a list.
-    if isinstance(data, str):
-        logger.warning("DefiLlama raises returned unexpected payload type=str; skipping")
-        return []
     if isinstance(data, dict):
-        if any(k in data for k in ("error", "message")):
-            logger.warning("DefiLlama raises returned error payload: %s", str(data)[:200])
-            return []
         raises = data.get("raises") or data.get("data") or data.get("results") or []
     else:
-        raises = data
-
-    if not isinstance(raises, list):
-        logger.warning(
-            "DefiLlama raises returned unexpected payload type=%s; skipping",
-            type(raises).__name__,
-        )
-        return []
-
+        raises = data or []
     items: List[Dict[str, Any]] = []
     for r in raises:
-        if not isinstance(r, dict):
-            continue
         # fields vary; commonly include date or announcedAt
         published_at = _iso_or_none(r.get("date")) or _iso_or_none(r.get("announcedAt"))
         if not published_at:
