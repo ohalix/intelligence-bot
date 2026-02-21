@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from telegram.ext import Application, CommandHandler
@@ -84,14 +85,13 @@ def main():
         # Trigger a one-time startup ingestion for the last 24 hours.
         # Must never crash bot and must not block Telegram update handling.
         async def _startup_ingest():
-            from datetime import datetime, timedelta
-
             lock: asyncio.Lock = application.bot_data["pipeline_lock"]
             if lock.locked():
                 logger.info("Startup ingestion skipped: pipeline already running.")
                 return
 
-            since = datetime.utcnow() - timedelta(hours=24)
+            # Avoid deprecated datetime.utcnow(); use timezone-aware UTC then drop tz.
+            since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=24)
             logger.info("Startup ingestion run triggered: since=%s", since.isoformat())
 
             try:
