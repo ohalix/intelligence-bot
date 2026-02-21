@@ -30,7 +30,7 @@ SAMPLE_RSS = """<?xml version="1.0" encoding="UTF-8" ?>
 <title>Test Post One</title>
 <link>https://example.com/post1</link>
 <description>Hello (world). Price moved 2.5%!</description>
-<pubDate>Mon, 17 Feb 2026 10:00:00 GMT</pubDate>
+<pubDate>{PUBDATE}</pubDate>
 </item>
 </channel>
 </rss>
@@ -56,21 +56,49 @@ class DummyResp:
         # RSS for feeds, HTML for web pages
         if any(k in self.url for k in ["/blog", "hyperliquid", "stacks"]):
             return SAMPLE_HTML
-        return SAMPLE_RSS
+        from email.utils import format_datetime
+        from datetime import datetime, timezone
+
+        return SAMPLE_RSS.format(PUBDATE=format_datetime(datetime.now(timezone.utc)))
 
     async def json(self):
         # Minimal JSON responses for API ingesters
         if "cryptocurrency.cv" in self.url:
+            from datetime import datetime, timedelta
             return [
                 {
                     "title": "API News Item",
                     "url": "https://example.com/api-news",
                     "description": "api desc",
-                    "published_at": "2026-02-17T10:00:00Z",
+                    # Keep relative so the harness doesn't become stale.
+                    "published_at": (datetime.utcnow() - timedelta(hours=1)).isoformat() + "Z",
                 }
             ]
         if "pro-api.coinmarketcap.com" in self.url:
-            return {"data": [{"title": "CMC Post", "url": "https://example.com/cmc", "subtitle": "sub", "created_at": "2026-02-17T10:00:00Z"}]}
+            from datetime import datetime, timedelta
+            return {
+                "data": [
+                    {
+                        "title": "CMC Post",
+                        "url": "https://example.com/cmc",
+                        "subtitle": "sub",
+                        "created_at": (datetime.utcnow() - timedelta(hours=1)).isoformat() + "Z",
+                    }
+                ]
+            }
+        if "api.llama.fi/raises" in self.url:
+            from datetime import datetime, timedelta
+            return {
+                "raises": [
+                    {
+                        "name": "Example Protocol",
+                        "round": "Seed",
+                        "amount": 5000000,
+                        "link": "https://example.com/raise",
+                        "date": (datetime.utcnow() - timedelta(hours=2)).date().isoformat(),
+                    }
+                ]
+            }
         # Minimal GitHub search response
         return {"items": [{"full_name": "acme/proto", "html_url": "https://github.com/acme/proto", "description": "test", "pushed_at": "2026-02-17T00:00:00Z"}]}
 
