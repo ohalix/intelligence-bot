@@ -24,8 +24,8 @@ DEFAULT_NEWS_WEB_SOURCES = [
 DEFAULT_NEWS_API_SOURCES = [
     # Public, no-key: cryptocurrency.cv
     "cryptocurrency_cv",
-    # Free-keyed: CoinMarketCap /v1/content/posts/latest (opt-in via NEWS_API_SOURCES)
-    # "coinmarketcap_posts_latest",
+    # Free-keyed: CoinMarketCap /v1/content/posts/latest can be unavailable on
+    # free plans (403 "plan doesn't support"). Keep opt-in via NEWS_API_SOURCES.
 ]
 
 # Ecosystem (official blogs + governance)
@@ -35,14 +35,13 @@ DEFAULT_ECOSYSTEM_RSS_SOURCES = [
 ]
 DEFAULT_ECOSYSTEM_WEB_SOURCES = [
     "https://blog.optimism.io/",
-    # Starknet content URLs have changed over time; keep a stable blog landing page.
-    "https://www.starknet.io/en/blog/",
+    "https://www.starknet.io/en/content/",
 ]
 DEFAULT_ECOSYSTEM_API_SOURCES = [
     # Public, no-key: Snapshot Hub GraphQL (governance proposals)
     "snapshot_proposals",
-    # DefiLlama ecosystem metrics (optional; enable via ECOSYSTEM_API_SOURCES when implemented)
-    # "defillama_chain_tvl",
+    # Public, no-key: DefiLlama open API (ecosystem metrics signals)
+    "defillama_chain_tvl",
 ]
 
 # Funding
@@ -52,8 +51,8 @@ DEFAULT_FUNDING_RSS_SOURCES = [
 ]
 DEFAULT_FUNDING_WEB_SOURCES = [
     "https://www.coindesk.com/tag/venture-capital/",
-    # Decrypt tag URLs are unstable; keep available via FUNDING_WEB_SOURCES override if desired.
-    # "https://decrypt.co/tag/funding",
+    # Decrypt funding tag URL is currently 404 in production logs; keep opt-in
+    # via FUNDING_WEB_SOURCES / FUNDING_WEB_EXTRA_SOURCES.
 ]
 DEFAULT_FUNDING_API_SOURCES = [
     # Public, no-key: DefiLlama raises

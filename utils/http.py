@@ -2,29 +2,47 @@ import asyncio
 from typing import Any, Dict, Optional
 
 import aiohttp
-from tenacity import retry, stop_after_attempt, wait_exponential_jitter, retry_if_exception_type
+from aiohttp import ClientConnectorDNSError
+from tenacity import retry, stop_after_attempt, wait_exponential_jitter
+
 
 class HTTPError(Exception):
-    pass
+    """Base HTTP error."""
 
 
 class RetryableHTTPError(HTTPError):
-    """HTTP error that is safe to retry (e.g., 5xx, 429)."""
+    """Safe to retry (e.g., 429, 5xx)."""
 
 
 class NonRetryableHTTPError(HTTPError):
-    """HTTP error that should not be retried (e.g., 4xx like 403/404)."""
+    """Should not be retried (e.g., 400/403/404)."""
 
 def make_timeout(config: Dict[str, Any]) -> aiohttp.ClientTimeout:
     seconds = int(config.get("rate_limits", {}).get("request_timeout_seconds", 15))
     return aiohttp.ClientTimeout(total=seconds)
 
+
+def _should_retry(exc: BaseException) -> bool:
+    """Retry policy tuned for ingestion reliability.
+
+    - Do NOT retry: 400/403/404 (invalid endpoint / blocked), DNS failures
+    - Retry: 429 and 5xx, timeouts, transient aiohttp client errors
+    """
+    if isinstance(exc, NonRetryableHTTPError):
+        return False
+    if isinstance(exc, ClientConnectorDNSError):
+        return False
+    if isinstance(exc, RetryableHTTPError):
+        return True
+    if isinstance(exc, (asyncio.TimeoutError, aiohttp.ClientError)):
+        return True
+    return False
+
 @retry(
     reraise=True,
-    # Keep retries conservative to avoid wasting requests on blocked/invalid endpoints.
-    stop=stop_after_attempt(3),
+    stop=stop_after_attempt(5),
     wait=wait_exponential_jitter(initial=1, max=30),
-    retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError, RetryableHTTPError)),
+    retry=_should_retry,
 )
 async def fetch_json(session: aiohttp.ClientSession, url: str, headers: Optional[Dict[str,str]]=None, params: Optional[Dict[str,Any]]=None) -> Any:
     timeout = getattr(session, "timeout", None)
@@ -40,9 +58,9 @@ async def fetch_json(session: aiohttp.ClientSession, url: str, headers: Optional
 
 @retry(
     reraise=True,
-    stop=stop_after_attempt(3),
+    stop=stop_after_attempt(5),
     wait=wait_exponential_jitter(initial=1, max=30),
-    retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError, RetryableHTTPError)),
+    retry=_should_retry,
 )
 async def fetch_text(session: aiohttp.ClientSession, url: str, headers: Optional[Dict[str,str]]=None, params: Optional[Dict[str,Any]]=None) -> str:
     timeout = getattr(session, "timeout", None)
@@ -59,9 +77,9 @@ async def fetch_text(session: aiohttp.ClientSession, url: str, headers: Optional
 
 @retry(
     reraise=True,
-    stop=stop_after_attempt(3),
+    stop=stop_after_attempt(5),
     wait=wait_exponential_jitter(initial=1, max=30),
-    retry=retry_if_exception_type((aiohttp.ClientError, asyncio.TimeoutError, RetryableHTTPError)),
+    retry=_should_retry,
 )
 async def fetch_json_post(
     session: aiohttp.ClientSession,
