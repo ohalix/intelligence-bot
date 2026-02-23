@@ -1,152 +1,135 @@
 import asyncio
 import logging
-import sys
+import os
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 from telegram.ext import Application, CommandHandler
 
-from utils.config import load_config
-from utils.logging import setup_logging
-from storage.sqlite_store import SQLiteStore
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from bot.telegram_commands import (
     cmd_dailybrief,
     cmd_funding,
     cmd_github,
-    cmd_news,
+    cmd_help,
     cmd_newprojects,
+    cmd_news,
     cmd_rawsignals,
-    cmd_run,
     cmd_sources,
     cmd_trends,
 )
-from bot.scheduler import start_scheduler
 
-# Ensure repo root is on path for local runs
-ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(ROOT))
+try:
+    from bot.telegram_commands import cmd_run  # optional in some patch levels
+except ImportError:
+    cmd_run = None
+from engine.pipeline import run_pipeline
+from storage.sqlite_store import SQLiteStore
+from utils.config import load_config
+
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
 
 logger = logging.getLogger(__name__)
 
 
-async def on_error(update, context):
-    """Global Telegram error handler.
+def start_scheduler(app, config, store: SQLiteStore, scheduler: AsyncIOScheduler):
+    async def job():
+        from engine.pipeline import rolling_since
 
-    Without this, PTB logs: "No error handlers are registered" and users get no feedback.
-    """
-    try:
-        chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
-        update_id = getattr(update, "update_id", None)
-
-        # Log full traceback server-side
-        logger.exception(
-            "Unhandled exception in handler (chat_id=%s, update_id=%s)",
-            chat_id,
-            update_id,
-            exc_info=context.error,
-        )
-
-        # Best-effort user-facing message
-        if chat_id is not None:
-            try:
-                await context.bot.send_message(
-                    chat_id=chat_id,
-                    text="⚠️ Something went wrong while processing that command. Please check logs.",
-                )
-            except Exception:
-                logger.exception("Failed to send error message to chat_id=%s", chat_id)
-    except Exception:
-        # Never raise from an error handler
-        logger.exception("Error inside global Telegram error handler")
-
-
-def main():
-    config = load_config()
-    setup_logging(config)
-
-    token = config.get("bot", {}).get("telegram_token")
-    if not token:
-        logger.error("Missing TELEGRAM_BOT_TOKEN. Set it in your environment or .env file.")
-        raise RuntimeError("TELEGRAM_BOT_TOKEN is required")
-
-    store = SQLiteStore(config.get("storage", {}).get("database_path", "./data/web3_intelligence.db"))
-
-    # Start APScheduler inside PTB's lifecycle so both share the same event loop.
-    async def _post_init(application: Application):
-        loop = asyncio.get_running_loop()
-        scheduler = start_scheduler(config, store, application, loop=loop)
-        application.bot_data["apscheduler"] = scheduler
-
-        # In-process lock to prevent concurrent pipeline runs (startup vs /run vs scheduler).
-        # Stored in bot_data so command handlers can use it.
-        application.bot_data.setdefault("pipeline_lock", asyncio.Lock())
-
-        # Trigger a one-time startup ingestion for the last 24 hours.
-        # Must never crash bot and must not block Telegram update handling.
-        async def _startup_ingest():
-            lock: asyncio.Lock = application.bot_data["pipeline_lock"]
-            if lock.locked():
-                logger.info("Startup ingestion skipped: pipeline already running.")
-                return
-
-            # Avoid deprecated datetime.utcnow(); use timezone-aware UTC then drop tz.
-            since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=24)
-            logger.info("Startup ingestion run triggered: since=%s", since.isoformat())
-
-            try:
-                async with lock:
-                    from engine.pipeline import run_pipeline
-
-                    result = await run_pipeline(config, store, manual=False, since_override=since)
-                    logger.info(
-                        "Startup ingestion run completed: inserted=%s total_seen=%s",
-                        result.get("inserted"),
-                        result.get("count"),
-                    )
-            except Exception:
-                logger.exception("Startup ingestion run failed")
-
-        # Fire-and-forget.
-        asyncio.create_task(_startup_ingest())
-
-    async def _post_shutdown(application: Application):
-        scheduler = application.bot_data.get("apscheduler")
+        since = rolling_since(config, store)
+        logger.info("Scheduled pipeline run starting. since=%s", since.isoformat())
         try:
-            if scheduler:
-                scheduler.shutdown(wait=False)
+            result = await run_pipeline(config, store, since, manual=False)
+            logger.info(
+                "Scheduled pipeline run complete. inserted=%s total_seen=%s",
+                result.get("inserted"),
+                result.get("total_seen"),
+            )
         except Exception:
-            logger.exception("Error shutting down scheduler")
+            logger.exception("Scheduled pipeline run failed")
 
-    app = (
-        Application.builder()
-        .token(token)
-        .post_init(_post_init)
-        .post_shutdown(_post_shutdown)
-        .build()
-    )
+    hours = int(config.get("scheduler", {}).get("run_interval_hours", 24))
+    scheduler.add_job(job, "interval", hours=hours)
+    scheduler.start()
+    return scheduler
 
-    # Global error handler
-    app.add_error_handler(on_error)
+
+async def _send_startup_notice(app, config):
+    chat_id = str(
+        os.getenv("ADMIN_CHAT_ID")
+        or os.getenv("TELEGRAM_CHAT_ID")
+        or config.get("bot", {}).get("chat_id")
+        or ""
+    ).strip()
+    if not chat_id:
+        logger.info("Startup notification skipped: ADMIN_CHAT_ID/TELEGRAM_CHAT_ID not set")
+        return
+    try:
+        msg = f"✅ Intelligence bot is running — {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC"
+        await app.bot.send_message(chat_id=chat_id, text=msg)
+        logger.info("Startup notification sent to admin chat")
+    except Exception:
+        logger.exception("Startup notification failed (non-fatal)")
+
+
+async def _startup_ingest(config, store):
+    if str(os.getenv("STARTUP_INGEST_ENABLED", "true")).strip().lower() not in {"1", "true", "yes", "on"}:
+        logger.info("Startup ingestion run disabled by STARTUP_INGEST_ENABLED")
+        return
+    since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=24)
+    logger.info("Startup ingestion run triggered: since=%s", since.isoformat())
+    try:
+        result = await run_pipeline(config, store, since, manual=False)
+        logger.info(
+            "Startup ingestion run completed: inserted=%s total_seen=%s",
+            result.get("inserted"),
+            result.get("total_seen"),
+        )
+    except Exception:
+        logger.exception("Startup ingestion run failed (non-fatal)")
+
+
+async def main():
+    config = load_config()
+    store = SQLiteStore(config["storage"]["db_path"])
+    app = Application.builder().token(config["bot"]["token"]).build()
 
     app.bot_data["config"] = config
     app.bot_data["store"] = store
 
-    app.add_handler(CommandHandler("dailybrief", cmd_dailybrief))
+    app.add_handler(CommandHandler("start", cmd_help))
+    app.add_handler(CommandHandler("help", cmd_help))
+    app.add_handler(CommandHandler("sources", cmd_sources))
     app.add_handler(CommandHandler("news", cmd_news))
-    app.add_handler(CommandHandler("newprojects", cmd_newprojects))
-    app.add_handler(CommandHandler("trends", cmd_trends))
     app.add_handler(CommandHandler("funding", cmd_funding))
     app.add_handler(CommandHandler("github", cmd_github))
+    app.add_handler(CommandHandler("newprojects", cmd_newprojects))
     app.add_handler(CommandHandler("rawsignals", cmd_rawsignals))
-    app.add_handler(CommandHandler("sources", cmd_sources))
-    app.add_handler(CommandHandler("run", cmd_run))
+    app.add_handler(CommandHandler("trends", cmd_trends))
+    app.add_handler(CommandHandler("dailybrief", cmd_dailybrief))
+    if cmd_run is not None:
+        app.add_handler(CommandHandler("run", cmd_run))
 
-    logger.info("Bot started (long polling).")
-    # IMPORTANT: run_polling is a blocking call that manages the asyncio loop internally.
-    # Do NOT wrap it in asyncio.run() and do NOT await it.
-    app.run_polling(allowed_updates=["message"])
+    scheduler = AsyncIOScheduler()
+    start_scheduler(app, config, store, scheduler)
+
+    await app.initialize()
+    await app.start()
+    await _send_startup_notice(app, config)
+    await _startup_ingest(config, store)
+    await app.updater.start_polling()
+
+    try:
+        await asyncio.Event().wait()
+    finally:
+        await app.updater.stop()
+        await app.stop()
+        await app.shutdown()
+        scheduler.shutdown(wait=False)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
