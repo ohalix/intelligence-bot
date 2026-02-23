@@ -1,281 +1,257 @@
 import json
-import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
-from email.utils import parsedate_to_datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
+def _utcnow_naive() -> datetime:
+    """UTC now as naive datetime to preserve existing SQLite string semantics."""
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
 def _normalize_ts(value: Any) -> str:
-    """Normalize timestamps to a UTC-naive ISO string.
-
-    We compare timestamps in SQLite using string comparisons. Mixed formats
-    (RFC822 dates, timezone offsets, trailing 'Z') can cause silent misses in
-    rolling-window queries. Normalizing on write and query is low-risk and
-    prevents "ingested but not visible" regressions.
-    """
     if value is None:
-        return datetime.utcnow().isoformat()
-
+        return _utcnow_naive().isoformat()
     if isinstance(value, datetime):
-        dt = value
+        if value.tzinfo is not None:
+            value = value.astimezone(timezone.utc).replace(tzinfo=None)
+        return value.isoformat()
+    s = str(value).strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
         if dt.tzinfo is not None:
             dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
         return dt.isoformat()
+    except Exception:
+        return str(value)
 
-    if isinstance(value, (int, float)):
-        try:
-            dt = datetime.fromtimestamp(float(value), tz=timezone.utc).replace(tzinfo=None)
-            return dt.isoformat()
-        except Exception:
-            return datetime.utcnow().isoformat()
 
-    if isinstance(value, str):
-        s = value.strip()
-        if not s:
-            return datetime.utcnow().isoformat()
-        # ISO8601 w/ optional trailing Z
-        try:
-            iso = s.replace("Z", "+00:00") if s.endswith("Z") else s
-            dt = datetime.fromisoformat(iso)
-            if dt.tzinfo is not None:
-                dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
-            return dt.isoformat()
-        except Exception:
-            pass
-        # RSS/HTTP-date (RFC822)
-        try:
-            dt = parsedate_to_datetime(s)
-            if dt.tzinfo is not None:
-                dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
-            return dt.isoformat()
-        except Exception:
-            return datetime.utcnow().isoformat()
+def _as_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
 
-    return datetime.utcnow().isoformat()
+
+def _as_json(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except Exception:
+        return json.dumps(str(value), ensure_ascii=False)
 
 
 class SQLiteStore:
-    """Tiny SQLite-backed store for signals + last-run checkpoint.
-
-    Contract expected by engine/pipeline.py and bot handlers:
-      - get_last_run / set_last_run
-      - upsert_signals
-      - get_signals_since
-      - clear_old_signals (best-effort)
-    """
-
     def __init__(self, db_path: str):
         self.db_path = db_path
-        parent = os.path.dirname(db_path)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
+        Path(Path(db_path).parent).mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
         self._init_db()
+        self._migrate()
 
-    def _conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
-
-    def _init_db(self) -> None:
-        with self._conn() as conn:
-            conn.execute(
-                """CREATE TABLE IF NOT EXISTS meta (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL
-                )"""
+    def _init_db(self):
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                url TEXT NOT NULL,
+                source TEXT NOT NULL,
+                description TEXT,
+                published_at TEXT,
+                score REAL DEFAULT 0,
+                sentiment REAL DEFAULT 0,
+                ecosystem TEXT,
+                tags TEXT,
+                raw_json TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
-
-            # Note: keep columns aligned with processing/formatter expectations.
-            conn.execute(
-                """CREATE TABLE IF NOT EXISTS signals (
-                    dedup_key TEXT PRIMARY KEY,
-                    source TEXT,
-                    type TEXT,
-                    title TEXT,
-                    description TEXT,
-                    url TEXT,
-                    timestamp TEXT,
-                    chain TEXT,
-                    sector TEXT,
-                    signal_score REAL,
-                    sentiment REAL,
-                    raw_json TEXT
-                )"""
-            )
-
-            self._migrate_signals_table(conn)
-
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_signals_timestamp ON signals(timestamp)")
-            conn.commit()
-
-    def _migrate_signals_table(self, conn: sqlite3.Connection) -> None:
-        """Ensure older DBs get new columns without breaking startup."""
-        try:
-            cols = {row["name"] for row in conn.execute("PRAGMA table_info(signals)").fetchall()}
-        except Exception:
-            return
-
-        # Older DBs may have only a subset of columns. We add missing ones
-        # to avoid runtime crashes when handlers query newer fields.
-        required: Dict[str, str] = {
-            "source": "TEXT",
-            "type": "TEXT",
-            "title": "TEXT",
-            "description": "TEXT",
-            "url": "TEXT",
-            "timestamp": "TEXT",
-            "chain": "TEXT",
-            "sector": "TEXT",
-            "signal_score": "REAL",
-            "sentiment": "REAL",
-            "raw_json": "TEXT",
-        }
-
-        for name, coltype in required.items():
-            if name in cols:
-                continue
-            try:
-                conn.execute(f"ALTER TABLE signals ADD COLUMN {name} {coltype}")
-            except sqlite3.OperationalError:
-                # Column may exist or table locked; ignore.
-                pass
-
-    # --- meta helpers ---
-
-    def get_meta(self, key: str) -> Optional[str]:
-        with self._conn() as conn:
-            row = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
-            return row["value"] if row else None
-
-    def set_meta(self, key: str, value: str) -> None:
-        with self._conn() as conn:
-            conn.execute(
-                "INSERT INTO meta(key,value) VALUES(?,?) "
-                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (key, value),
-            )
-            conn.commit()
-
-    # --- checkpoint ---
-
-    def get_last_run(self) -> Optional[datetime]:
-        v = self.get_meta("last_run_timestamp")
-        if not v:
-            return None
-        try:
-            return datetime.fromisoformat(v)
-        except Exception:
-            return None
-
-    def set_last_run(self, ts: datetime) -> None:
-        self.set_meta("last_run_timestamp", ts.isoformat())
-
-    # --- signals ---
-
-    def upsert_signals(self, signals: List[Dict[str, Any]]) -> int:
-        """Insert/update signals by dedup_key. Returns count written."""
-        if not signals:
-            return 0
-
-        written = 0
-        with self._conn() as conn:
-            for s in signals:
-                dedup_key = s.get("dedup_key") or s.get("id")
-                if not dedup_key:
-                    # Skip malformed items.
-                    continue
-
-                # Normalize timestamp to a stable ISO format for reliable window queries.
-                ts_str = _normalize_ts(s.get("timestamp"))
-
-                raw_json = s.get("raw_json")
-                if raw_json is None:
-                    try:
-                        raw_json = json.dumps(s.get("raw", s), default=str)
-                    except Exception:
-                        raw_json = "{}"
-
-                conn.execute(
-                    """INSERT INTO signals(
-                        dedup_key, source, type, title, description, url, timestamp,
-                        chain, sector, signal_score, sentiment, raw_json
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
-                    ON CONFLICT(dedup_key) DO UPDATE SET
-                        source=excluded.source,
-                        type=excluded.type,
-                        title=excluded.title,
-                        description=excluded.description,
-                        url=excluded.url,
-                        timestamp=excluded.timestamp,
-                        chain=excluded.chain,
-                        sector=excluded.sector,
-                        signal_score=excluded.signal_score,
-                        sentiment=excluded.sentiment,
-                        raw_json=excluded.raw_json
-                    """,
-                    (
-                        dedup_key,
-                        s.get("source"),
-                        s.get("type"),
-                        s.get("title"),
-                        s.get("description"),
-                        s.get("url"),
-                        ts_str,
-                        s.get("chain"),
-                        s.get("sector"),
-                        s.get("signal_score"),
-                        s.get("sentiment"),
-                        raw_json,
-                    ),
-                )
-                written += 1
-
-            conn.commit()
-
-        return written
-
-    def get_signals_since(
-        self,
-        since_ts: datetime,
-        source: Optional[str] = None,
-        limit: int = 10,
-    ) -> List[Dict[str, Any]]:
-        """Fetch signals newer than since_ts. If source is None, return all."""
-        since_iso = _normalize_ts(since_ts)
-
-        q = (
-            "SELECT dedup_key, source, type, title, description, url, timestamp, "
-            "chain, sector, signal_score, sentiment, raw_json "
-            "FROM signals WHERE timestamp >= ?"
+            """
         )
-        params: List[Any] = [since_iso]
-        if source:
-            q += " AND source = ?"
-            params.append(source)
-        q += " ORDER BY timestamp DESC LIMIT ?"
-        params.append(int(limit))
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_published_at ON signals(published_at)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_url ON signals(url)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_source ON signals(source)")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS meta (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS manual_runs (
+                run_date TEXT PRIMARY KEY,
+                count INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        self.conn.commit()
 
-        with self._conn() as conn:
-            rows = conn.execute(q, tuple(params)).fetchall()
+    def _migrate(self):
+        cur = self.conn.cursor()
+        cur.execute("PRAGMA table_info(signals)")
+        cols = {row[1] for row in cur.fetchall()}
+        if "ecosystem" not in cols:
+            cur.execute("ALTER TABLE signals ADD COLUMN ecosystem TEXT")
+        if "tags" not in cols:
+            cur.execute("ALTER TABLE signals ADD COLUMN tags TEXT")
+        if "raw_json" not in cols:
+            cur.execute("ALTER TABLE signals ADD COLUMN raw_json TEXT")
+        self.conn.commit()
 
+    def insert_signals(self, signals: List[Dict[str, Any]]) -> int:
+        cur = self.conn.cursor()
+        inserted = 0
+        for s in signals:
+            title = str(s.get("title", "")).strip()
+            url = str(s.get("url", "")).strip()
+            source = str(s.get("source", "unknown")).strip() or "unknown"
+            if not title or not url:
+                continue
+
+            # Prevent exact duplicate URLs (hard guard), while rolling-window dedup handles fuzzy dupes upstream.
+            cur.execute("SELECT 1 FROM signals WHERE url = ? LIMIT 1", (url,))
+            if cur.fetchone():
+                continue
+
+            published_at = _normalize_ts(s.get("published_at"))
+            score = _as_float(s.get("score", 0.0), 0.0)
+
+            sentiment_val = s.get("sentiment", 0.0)
+            if isinstance(sentiment_val, (int, float)):
+                sentiment = float(sentiment_val)
+            else:
+                # Backward-compatible fallback for label-based sentiment.
+                sentiment_map = {
+                    "very_bearish": -1.0,
+                    "bearish": -0.5,
+                    "negative": -0.5,
+                    "neutral": 0.0,
+                    "positive": 0.5,
+                    "bullish": 0.5,
+                    "very_bullish": 1.0,
+                }
+                sentiment = sentiment_map.get(str(sentiment_val).strip().lower(), 0.0)
+
+            ecosystem = str(s.get("ecosystem", "") or "")
+            tags = s.get("tags", [])
+            if not isinstance(tags, list):
+                tags = [str(tags)]
+            description = str(s.get("description", "") or "")
+            raw_json = _as_json(s)
+
+            cur.execute(
+                """
+                INSERT INTO signals (title, url, source, description, published_at, score, sentiment, ecosystem, tags, raw_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (title, url, source, description, published_at, score, sentiment, ecosystem, json.dumps(tags, ensure_ascii=False), raw_json),
+            )
+            inserted += 1
+
+        self.conn.commit()
+        return inserted
+
+    def get_signals_since(self, since: datetime) -> List[Dict[str, Any]]:
+        if since.tzinfo is not None:
+            since = since.astimezone(timezone.utc).replace(tzinfo=None)
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            SELECT id, title, url, source, description, published_at, score, sentiment, ecosystem, tags, raw_json
+            FROM signals
+            WHERE published_at >= ?
+            ORDER BY COALESCE(score, 0) DESC, published_at DESC
+            """,
+            (since.isoformat(),),
+        )
+        rows = cur.fetchall()
         out: List[Dict[str, Any]] = []
         for r in rows:
-            d = dict(r)
-            # Some downstream expects id-like field.
-            d.setdefault("id", d.get("dedup_key"))
-            out.append(d)
+            try:
+                tags = json.loads(r["tags"]) if r["tags"] else []
+                if not isinstance(tags, list):
+                    tags = [str(tags)]
+            except Exception:
+                tags = []
+            out.append(
+                {
+                    "id": r["id"],
+                    "title": r["title"],
+                    "url": r["url"],
+                    "source": r["source"],
+                    "description": r["description"] or "",
+                    "published_at": r["published_at"],
+                    "score": r["score"] if r["score"] is not None else 0.0,
+                    "sentiment": r["sentiment"] if r["sentiment"] is not None else 0.0,
+                    "ecosystem": r["ecosystem"] or "",
+                    "tags": tags,
+                }
+            )
         return out
 
-    def purge_old(self, days: int = 7) -> int:
-        """Compatibility: remove signals older than now - days."""
-        cutoff = datetime.utcnow() - timedelta(days=int(days))
-        return self.clear_old_signals(cutoff)
+    def purge_older_than(self, days: int = 30) -> int:
+        cutoff = _utcnow_naive() - timedelta(days=int(days))
+        cur = self.conn.cursor()
+        cur.execute("DELETE FROM signals WHERE published_at < ?", (cutoff.isoformat(),))
+        deleted = cur.rowcount if cur.rowcount is not None else 0
+        self.conn.commit()
+        return int(deleted)
 
-    def clear_old_signals(self, older_than: datetime) -> int:
-        """Best-effort cleanup to keep DB small."""
-        older_iso = _normalize_ts(older_than)
-        with self._conn() as conn:
-            cur = conn.execute("DELETE FROM signals WHERE timestamp < ?", (older_iso,))
-            conn.commit()
-            return int(cur.rowcount or 0)
+    def set_last_run(self, dt: datetime):
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO meta (key, value) VALUES ('last_run_timestamp', ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value
+            """,
+            (dt.isoformat(),),
+        )
+        self.conn.commit()
+
+    def get_last_run(self) -> Optional[datetime]:
+        cur = self.conn.cursor()
+        cur.execute("SELECT value FROM meta WHERE key='last_run_timestamp'")
+        row = cur.fetchone()
+        if not row:
+            return None
+        s = str(row["value"]).strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(s)
+            if dt.tzinfo is not None:
+                dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+            return dt
+        except Exception:
+            return None
+
+    def get_manual_run_count(self, run_date: str) -> int:
+        cur = self.conn.cursor()
+        cur.execute("SELECT count FROM manual_runs WHERE run_date = ?", (run_date,))
+        row = cur.fetchone()
+        if not row:
+            return 0
+        try:
+            return int(row["count"])
+        except Exception:
+            return 0
+
+    def increment_manual_run_count(self, run_date: str) -> int:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO manual_runs (run_date, count) VALUES (?, 1)
+            ON CONFLICT(run_date) DO UPDATE SET count = count + 1
+            """,
+            (run_date,),
+        )
+        self.conn.commit()
+        return self.get_manual_run_count(run_date)
