@@ -1,24 +1,29 @@
-"""Minimal, polite web scraping utilities.
+"""Minimal, polite web scraping utilities with BeautifulSoup-backed parsing.
 
 Design goals:
-- Async, safe timeouts
+- Async, safe timeouts (reuse utils.http fetch client)
 - Rate limit per domain
 - Small cache (24h) to avoid refetching
-- Very lightweight parsing: title + a[href] anchors
+- Compatibility-first return shape for ingestion callers
+- Better HTML parsing/extraction quality via BeautifulSoup
 
-This is a fallback/augment layer when RSS is missing/broken/blocked.
+This remains a fallback/augment layer when RSS is missing/broken/blocked.
 """
 
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import html as html_lib
 import json
 import os
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
+
+from bs4 import BeautifulSoup
 
 from utils.http import fetch_text
 
@@ -27,14 +32,32 @@ from utils.http import fetch_text
 class ScrapeItem:
     title: str
     url: str
+    snippet: str = ""
 
 
 CACHE_DIR = os.path.join(".cache", "web")
 DEFAULT_CACHE_TTL_SEC = 24 * 60 * 60
+MAX_SNIPPET_LEN = 240
 
 # Per-domain rate limiting state
 _DOMAIN_LOCKS: dict[str, asyncio.Lock] = {}
 _DOMAIN_LAST_TS: dict[str, float] = {}
+
+# Known tracking params safe to strip for dedup-friendly URLs.
+_TRACKING_PARAMS = {
+    "utm_source",
+    "utm_medium",
+    "utm_campaign",
+    "utm_term",
+    "utm_content",
+    "gclid",
+    "fbclid",
+    "mc_cid",
+    "mc_eid",
+    "ref",
+    "ref_src",
+    "source",
+}
 
 
 def _cache_path(url: str) -> str:
@@ -100,83 +123,144 @@ async def fetch_cached_html(
     return content
 
 
-def _extract_anchors(html_text: str, base_url: str) -> List[ScrapeItem]:
-    """Very small HTML anchor extractor.
+def _normalize_url(url: str, base_url: str) -> str:
+    full = urljoin(base_url, url or "")
+    parsed = urlparse(full)
+    if not parsed.scheme or not parsed.netloc:
+        return full
+    q = [(k, v) for (k, v) in parse_qsl(parsed.query, keep_blank_values=True) if k.lower() not in _TRACKING_PARAMS]
+    normalized = parsed._replace(fragment="", query=urlencode(q, doseq=True))
+    return urlunparse(normalized)
 
-    We intentionally avoid site-specific selectors and heavy dependencies.
-    This is a heuristic fallback to capture *some* recent links.
+
+def _clean_text(value: str) -> str:
+    if not value:
+        return ""
+    value = html_lib.unescape(value)
+    value = re.sub(r"\s+", " ", value)
+    return value.strip()
+
+
+def _is_probably_blocked_page(html_text: str) -> bool:
+    head = (html_text or "")[:5000].lower()
+    return (
+        "just a moment" in head
+        or "cf-browser-verification" in head
+        or "/cdn-cgi/" in head
+        or "captcha" in head and "cloudflare" in head
+    )
+
+
+def _extract_page_metadata(html_text: str, base_url: str) -> Dict[str, str]:
+    """Best-effort page metadata extraction.
+
+    Compatibility helper for current and future ingesters. Not all callers use every field,
+    but this centralizes high-quality extraction.
     """
+    soup = BeautifulSoup(html_text, "html.parser")
+    meta: Dict[str, str] = {
+        "title": "",
+        "canonical_url": "",
+        "published_at": "",
+        "site_name": "",
+        "description": "",
+    }
+
+    if soup.title and soup.title.string:
+        meta["title"] = _clean_text(soup.title.string)
+
+    # Meta tags (OpenGraph / standard)
+    for m in soup.find_all("meta"):
+        key = (m.get("property") or m.get("name") or "").strip().lower()
+        content = _clean_text(m.get("content") or "")
+        if not content:
+            continue
+        if key in {"og:title", "twitter:title", "title"} and not meta["title"]:
+            meta["title"] = content
+        elif key in {"description", "og:description", "twitter:description"} and not meta["description"]:
+            meta["description"] = content
+        elif key in {"og:site_name", "application-name"} and not meta["site_name"]:
+            meta["site_name"] = content
+        elif key in {
+            "article:published_time",
+            "publishdate",
+            "pubdate",
+            "date",
+            "dc.date",
+            "dc.date.issued",
+        } and not meta["published_at"]:
+            meta["published_at"] = content
+        elif key in {"og:url"} and not meta["canonical_url"]:
+            meta["canonical_url"] = _normalize_url(content, base_url)
+
+    link_canonical = soup.find("link", rel=lambda v: v and "canonical" in str(v).lower())
+    if link_canonical and link_canonical.get("href") and not meta["canonical_url"]:
+        meta["canonical_url"] = _normalize_url(link_canonical.get("href"), base_url)
+
+    time_tag = soup.find("time")
+    if time_tag and not meta["published_at"]:
+        meta["published_at"] = _clean_text(time_tag.get("datetime") or time_tag.get_text(" ", strip=True))
+
+    # Lightweight excerpt from first non-trivial paragraph/article content.
+    if not meta["description"]:
+        for sel in ["article p", "main p", "p"]:
+            p = soup.select_one(sel)
+            if p:
+                txt = _clean_text(p.get_text(" ", strip=True))
+                if len(txt) >= 40:
+                    meta["description"] = txt[:MAX_SNIPPET_LEN]
+                    break
+
+    return meta
+
+
+def _anchor_text(a) -> str:
+    return _clean_text(a.get_text(" ", strip=True))
+
+
+def _extract_anchors_bs4(html_text: str, base_url: str) -> List[ScrapeItem]:
+    soup = BeautifulSoup(html_text, "html.parser")
+
+    # Remove obvious noise nodes before text extraction.
+    for tag in soup(["script", "style", "noscript", "svg", "iframe"]):
+        tag.decompose()
 
     items: List[ScrapeItem] = []
+    seen: set[str] = set()
 
-    # Basic scanning for <a ... href="...">Title</a>
-    lower = html_text
-    pos = 0
-    while True:
-        a = lower.find("<a", pos)
-        if a == -1:
-            break
-        href_idx = lower.find("href=", a)
-        if href_idx == -1:
-            pos = a + 2
-            continue
-        q = lower.find('"', href_idx)
-        if q == -1:
-            pos = href_idx + 5
-            continue
-        q2 = lower.find('"', q + 1)
-        if q2 == -1:
-            pos = q + 1
-            continue
-        href = lower[q + 1 : q2].strip()
-
-        # Extract anchor text (best effort)
-        gt = lower.find(">", q2)
-        if gt == -1:
-            pos = q2 + 1
-            continue
-        end = lower.find("</a>", gt)
-        if end == -1:
-            pos = gt + 1
-            continue
-        text = lower[gt + 1 : end]
-
-        # Strip tags and whitespace
-        text = " ".join(text.replace("&nbsp;", " ").split())
-        # Remove any remaining tags crudely
-        while "<" in text and ">" in text:
-            l = text.find("<")
-            r = text.find(">", l)
-            if r == -1:
-                break
-            text = (text[:l] + " " + text[r + 1 :]).strip()
-
-        pos = end + 4
-
+    for a in soup.find_all("a", href=True):
+        href = (a.get("href") or "").strip()
         if not href or href.startswith("#"):
             continue
-        if href.startswith("mailto:") or href.startswith("javascript:"):
+        if href.startswith("mailto:") or href.startswith("javascript:") or href.startswith("tel:"):
             continue
 
-        full = urljoin(base_url, href)
-        if len(text) < 8:
+        title = _anchor_text(a)
+        if len(title) < 8:
             continue
 
-        items.append(ScrapeItem(title=text[:200], url=full))
-
-    # Deduplicate by url
-    seen = set()
-    out: List[ScrapeItem] = []
-    for it in items:
-        if it.url in seen:
+        full = _normalize_url(href, base_url)
+        if not full or full in seen:
             continue
-        seen.add(it.url)
-        out.append(it)
-    return out
+
+        # Optional local snippet from nearby DOM context.
+        snippet = ""
+        parent = a.find_parent(["article", "li", "div", "section"])
+        if parent is not None:
+            for p in parent.find_all(["p", "span"], limit=3):
+                txt = _clean_text(p.get_text(" ", strip=True))
+                if len(txt) >= 30 and txt != title:
+                    snippet = txt[:MAX_SNIPPET_LEN]
+                    break
+
+        seen.add(full)
+        items.append(ScrapeItem(title=title[:200], url=full, snippet=snippet))
+
+    return items
 
 
 def _relevance_filter(items: List[ScrapeItem], base_url: str) -> List[ScrapeItem]:
-    """Keep likely 'post' links and same-domain links."""
+    """Keep likely post links and same-domain links; degrade gracefully if nothing matches."""
     base_netloc = urlparse(base_url).netloc
     out: List[ScrapeItem] = []
     for it in items:
@@ -184,7 +268,7 @@ def _relevance_filter(items: List[ScrapeItem], base_url: str) -> List[ScrapeItem
         if u.netloc and u.netloc != base_netloc:
             continue
         path = u.path.lower()
-        if any(k in path for k in ["blog", "post", "posts", "updates", "news", "announc", "grants"]):
+        if any(k in path for k in ["blog", "post", "posts", "updates", "news", "announc", "grants", "article"]):
             out.append(it)
     return out or items
 
@@ -196,14 +280,37 @@ async def scrape_page_links(
     max_items: int = 10,
     cache_ttl_sec: int = DEFAULT_CACHE_TTL_SEC,
 ) -> List[Dict[str, Any]]:
-    """Scrape a page for candidate post links."""
+    """Scrape a page for candidate post links.
+
+    Compatibility return shape remains a list[dict] with at least title/url keys.
+    Extra keys are included on best-effort basis but are optional for callers.
+    """
 
     html_text = await fetch_cached_html(session, url, cache_ttl_sec=cache_ttl_sec)
-    anchors = _extract_anchors(html_text, url)
+    if not html_text or not isinstance(html_text, str):
+        return []
+
+    sample = html_text.lstrip()[:200].lower()
+    if sample.startswith("<?xml") or "<rss" in sample or "<feed" in sample:
+        return []
+
+    if _is_probably_blocked_page(html_text):
+        raise RuntimeError("Blocked/anti-bot page detected")
+
+    page_meta = _extract_page_metadata(html_text, url)
+    anchors = _extract_anchors_bs4(html_text, url)
     anchors = _relevance_filter(anchors, url)
 
-    # Return as raw signals (title/url)
     out: List[Dict[str, Any]] = []
     for it in anchors[:max_items]:
-        out.append({"title": it.title, "url": it.url})
+        out.append(
+            {
+                "title": it.title,
+                "url": it.url,
+                "description": it.snippet,
+                "page_title": page_meta.get("title", ""),
+                "page_site_name": page_meta.get("site_name", ""),
+                "page_published_at": page_meta.get("published_at", ""),
+            }
+        )
     return out
