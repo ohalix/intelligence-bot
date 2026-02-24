@@ -429,6 +429,32 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
 
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Compatibility help command used by main.py startup/handlers."""
+
+    text = (
+        "<b>Web3 Intelligence Bot</b>\n"
+        "Available commands:\n"
+        "• /dailybrief — daily brief summary\n"
+        "• /news — latest news signals\n"
+        "• /rawsignals — raw signal dump\n"
+        "• /trends — trend clusters\n"
+        "• /funding — funding & ecosystem signals\n"
+        "• /github — GitHub activity\n"
+        "• /newprojects — new project signals\n"
+        "• /sources — show configured sources\n"
+        "• /run — manual pipeline run (if enabled)"
+    )
+
+    await _safe_reply(
+        update,
+        context,
+        text,
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+    )
+
 def _read_sources_from_module(mod_path: str, candidates: list[str]) -> tuple[str, list[str]]:
     """Best-effort extraction of sources from ingestion modules.
 
