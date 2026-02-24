@@ -71,9 +71,6 @@ class SQLiteStore:
             )
             """
         )
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_published_at ON signals(published_at)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_url ON signals(url)")
-        cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_source ON signals(source)")
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS meta (
@@ -91,18 +88,46 @@ class SQLiteStore:
             """
         )
         self.conn.commit()
+        self._ensure_signals_schema_compat()
 
-    def _migrate(self):
+    def _ensure_signals_schema_compat(self):
         cur = self.conn.cursor()
         cur.execute("PRAGMA table_info(signals)")
         cols = {row[1] for row in cur.fetchall()}
+
+        missing_cols = []
+        if "published_at" not in cols:
+            cur.execute("ALTER TABLE signals ADD COLUMN published_at TEXT")
+            missing_cols.append("published_at")
         if "ecosystem" not in cols:
             cur.execute("ALTER TABLE signals ADD COLUMN ecosystem TEXT")
+            missing_cols.append("ecosystem")
         if "tags" not in cols:
             cur.execute("ALTER TABLE signals ADD COLUMN tags TEXT")
+            missing_cols.append("tags")
         if "raw_json" not in cols:
             cur.execute("ALTER TABLE signals ADD COLUMN raw_json TEXT")
+            missing_cols.append("raw_json")
+
+        # Refresh column set after potential ALTER TABLE statements.
+        if missing_cols:
+            cur.execute("PRAGMA table_info(signals)")
+            cols = {row[1] for row in cur.fetchall()}
+
+        if "published_at" in cols:
+            cur.execute(
+                "UPDATE signals SET published_at = COALESCE(published_at, created_at) WHERE published_at IS NULL"
+            )
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_published_at ON signals(published_at)")
+        if "url" in cols:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_url ON signals(url)")
+        if "source" in cols:
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_source ON signals(source)")
+
         self.conn.commit()
+
+    def _migrate(self):
+        self._ensure_signals_schema_compat()
 
     def insert_signals(self, signals: List[Dict[str, Any]]) -> int:
         cur = self.conn.cursor()
