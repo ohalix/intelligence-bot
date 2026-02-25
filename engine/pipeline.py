@@ -66,18 +66,18 @@ def _sentiment_type_breakdown(signals: List[Dict[str, Any]]) -> Dict[str, int]:
 async def run_pipeline(
     config: Dict[str, Any],
     store: SQLiteStore,
-    since: datetime,
+    since: datetime | None = None,
     manual: bool = False,
+    since_override: datetime | None = None,
 ) -> Dict[str, Any]:
-    logger.info("Pipeline start. since=%s manual=%s", since.isoformat(), manual)
+    effective_since = since_override or since or (_utcnow_naive() - timedelta(hours=24))
+    logger.info("Pipeline start. since=%s manual=%s", effective_since.isoformat(), manual)
 
     raw_signals: List[Dict[str, Any]] = []
     ingestion_counts: Dict[str, int] = {}
 
     timeout = make_timeout(config)
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        # Web/API ingesters in the current repo require a shared aiohttp session
-        # injection. TwitterIngester keeps its existing constructor contract.
         ingesters = [
             NewsIngester(config, session),
             GitHubIngester(config, session),
@@ -88,7 +88,10 @@ async def run_pipeline(
 
         for ing in ingesters:
             try:
-                items = await ing.fetch(since)
+                ingest_fn = getattr(ing, "ingest", None)
+                if ingest_fn is None:
+                    raise AttributeError(f"{ing.__class__.__name__} missing ingest()")
+                items = await ingest_fn(effective_since)
                 raw_signals.extend(items)
                 ingestion_counts[ing.__class__.__name__] = len(items)
                 logger.info("Ingested %s from %s", len(items), ing.__class__.__name__)
