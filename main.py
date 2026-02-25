@@ -17,6 +17,7 @@ from bot.telegram_commands import (
     cmd_rawsignals,
     cmd_sources,
     cmd_trends,
+    telegram_error_handler,
 )
 
 try:
@@ -112,6 +113,8 @@ async def main():
     app.add_handler(CommandHandler("dailybrief", cmd_dailybrief))
     if cmd_run is not None:
         app.add_handler(CommandHandler("run", cmd_run))
+
+    app.add_error_handler(telegram_error_handler)
 
     scheduler = AsyncIOScheduler()
     start_scheduler(app, config, store, scheduler)
