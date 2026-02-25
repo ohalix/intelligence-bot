@@ -63,9 +63,14 @@ def _sentiment_type_breakdown(signals: List[Dict[str, Any]]) -> Dict[str, int]:
 async def run_pipeline(
     config: Dict[str, Any],
     store: SQLiteStore,
-    since: datetime,
+    since: datetime | None = None,
     manual: bool = False,
+    since_override: datetime | None = None,
 ) -> Dict[str, Any]:
+    if since_override is not None:
+        since = since_override
+    if since is None:
+        since = rolling_since(config, store)
     logger.info("Pipeline start. since=%s manual=%s", since.isoformat(), manual)
 
     ingesters = [
