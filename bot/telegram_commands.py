@@ -526,4 +526,16 @@ async def cmd_sources(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def telegram_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.exception("Unhandled Telegram update error", exc_info=context.error)
+    try:
+        upd_type = type(update).__name__ if update is not None else None
+        user_id = getattr(getattr(update, "effective_user", None), "id", None)
+        chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
+        log.exception(
+            "Unhandled Telegram update error update_type=%s user_id=%s chat_id=%s",
+            upd_type,
+            user_id,
+            chat_id,
+            exc_info=getattr(context, "error", None),
+        )
+    except Exception:
+        log.exception("Unhandled Telegram update error (fallback logging path)")
