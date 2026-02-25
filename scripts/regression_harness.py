@@ -12,14 +12,18 @@ It is a developer tool only.
 """
 
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, UTC
 
-from ingestion.news_ingest import NewsIngester
-from ingestion.funding_ingest import FundingIngester
-from ingestion.ecosystem_ingest import EcosystemIngester
-from ingestion.github_ingest import GitHubIngester
-
-from bot.formatter import format_dailybrief_html, format_section_html
+try:
+    from ingestion.news_ingest import NewsIngester
+    from ingestion.funding_ingest import FundingIngester
+    from ingestion.ecosystem_ingest import EcosystemIngester
+    from ingestion.github_ingest import GitHubIngester
+    from bot.formatter import format_dailybrief_html, format_section_html
+except ModuleNotFoundError as e:
+    missing = getattr(e, "name", str(e))
+    print(f"Regression harness dependency missing: {missing}. Install app/test dependencies and retry.", file=sys.stderr)
+    raise SystemExit(2)
 
 
 SAMPLE_RSS = """<?xml version="1.0" encoding="UTF-8" ?>
@@ -64,30 +68,30 @@ class DummyResp:
     async def json(self):
         # Minimal JSON responses for API ingesters
         if "cryptocurrency.cv" in self.url:
-            from datetime import datetime, timedelta
+            from datetime import datetime, timedelta, UTC
             return [
                 {
                     "title": "API News Item",
                     "url": "https://example.com/api-news",
                     "description": "api desc",
                     # Keep relative so the harness doesn't become stale.
-                    "published_at": (datetime.utcnow() - timedelta(hours=1)).isoformat() + "Z",
+                    "published_at": (datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=1)).isoformat() + "Z",
                 }
             ]
         if "pro-api.coinmarketcap.com" in self.url:
-            from datetime import datetime, timedelta
+            from datetime import datetime, timedelta, UTC
             return {
                 "data": [
                     {
                         "title": "CMC Post",
                         "url": "https://example.com/cmc",
                         "subtitle": "sub",
-                        "created_at": (datetime.utcnow() - timedelta(hours=1)).isoformat() + "Z",
+                        "created_at": (datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=1)).isoformat() + "Z",
                     }
                 ]
             }
         if "api.llama.fi/raises" in self.url:
-            from datetime import datetime, timedelta
+            from datetime import datetime, timedelta, UTC
             return {
                 "raises": [
                     {
@@ -95,7 +99,7 @@ class DummyResp:
                         "round": "Seed",
                         "amount": 5000000,
                         "link": "https://example.com/raise",
-                        "date": (datetime.utcnow() - timedelta(hours=2)).date().isoformat(),
+                        "date": (datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=2)).date().isoformat(),
                     }
                 ]
             }
@@ -120,7 +124,7 @@ async def run_once() -> None:
         "github": {"queries": [], "concurrency": 1},
     }
 
-    since = datetime.utcnow() - timedelta(days=3)
+    since = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=3)
     sess = DummySession()
 
     news = NewsIngester(cfg, sess)
