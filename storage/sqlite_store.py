@@ -142,6 +142,11 @@ class SQLiteStore:
     def _migrate(self):
         self._ensure_signals_schema_compat()
 
+    def _signals_columns(self) -> set[str]:
+        cur = self.conn.cursor()
+        cur.execute("PRAGMA table_info(signals)")
+        return {str(row[1]) for row in cur.fetchall()}
+
     def insert_signals(self, signals: List[Dict[str, Any]]) -> int:
         cur = self.conn.cursor()
         inserted = 0
@@ -195,19 +200,34 @@ class SQLiteStore:
         self.conn.commit()
         return inserted
 
-    def get_signals_since(self, since: datetime) -> List[Dict[str, Any]]:
+    def get_signals_since(self, since: datetime, signal_type: Optional[str] = None, limit: Optional[int] = None) -> List[Dict[str, Any]]:
         if since.tzinfo is not None:
             since = since.astimezone(timezone.utc).replace(tzinfo=None)
+
+        cols = self._signals_columns()
+        has_id = "id" in cols
+        id_expr = "id" if has_id else "rowid AS id"
+        order_id = "id" if has_id else "rowid"
+
+        select_cols = [id_expr, "title", "url", "source"]
+        if "signal_type" in cols:
+            select_cols.append("signal_type")
+        select_cols.extend(["description", "published_at", "score", "sentiment", "ecosystem", "tags", "raw_json"])
+
+        query = f"SELECT {', '.join(select_cols)} FROM signals WHERE published_at >= ?"
+        params: list[Any] = [since.isoformat()]
+
+        if signal_type and "signal_type" in cols:
+            query += " AND signal_type = ?"
+            params.append(signal_type)
+
+        query += f" ORDER BY COALESCE(score, 0) DESC, published_at DESC, {order_id} DESC"
+        if isinstance(limit, int) and limit > 0:
+            query += " LIMIT ?"
+            params.append(limit)
+
         cur = self.conn.cursor()
-        cur.execute(
-            """
-            SELECT id, title, url, source, description, published_at, score, sentiment, ecosystem, tags, raw_json
-            FROM signals
-            WHERE published_at >= ?
-            ORDER BY COALESCE(score, 0) DESC, published_at DESC
-            """,
-            (since.isoformat(),),
-        )
+        cur.execute(query, tuple(params))
         rows = cur.fetchall()
         out: List[Dict[str, Any]] = []
         for r in rows:
@@ -223,6 +243,7 @@ class SQLiteStore:
                     "title": r["title"],
                     "url": r["url"],
                     "source": r["source"],
+                    "signal_type": (r["signal_type"] if "signal_type" in r.keys() else None),
                     "description": r["description"] or "",
                     "published_at": r["published_at"],
                     "score": r["score"] if r["score"] is not None else 0.0,
@@ -270,6 +291,24 @@ class SQLiteStore:
             return dt
         except Exception:
             return None
+
+
+    def get_meta(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        cur = self.conn.cursor()
+        cur.execute("SELECT value FROM meta WHERE key = ?", (key,))
+        row = cur.fetchone()
+        return default if not row else row["value"]
+
+    def set_meta(self, key: str, value: str) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO meta (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value
+            """,
+            (key, str(value)),
+        )
+        self.conn.commit()
 
     def get_manual_run_count(self, run_date: str) -> int:
         cur = self.conn.cursor()
