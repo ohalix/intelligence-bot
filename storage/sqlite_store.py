@@ -115,9 +115,22 @@ class SQLiteStore:
             cols = {row[1] for row in cur.fetchall()}
 
         if "published_at" in cols:
-            cur.execute(
-                "UPDATE signals SET published_at = COALESCE(published_at, created_at) WHERE published_at IS NULL"
-            )
+            backfill_candidates = [
+                "created_at",
+                "timestamp",
+                "ts",
+                "inserted_at",
+                "seen_at",
+                "date",
+                "published",
+            ]
+            backfill_col = next((c for c in backfill_candidates if c in cols), None)
+            if backfill_col:
+                cur.execute(
+                    f"UPDATE signals SET published_at = COALESCE(published_at, {backfill_col}) WHERE published_at IS NULL"
+                )
+            else:
+                pass
             cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_published_at ON signals(published_at)")
         if "url" in cols:
             cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_url ON signals(url)")
