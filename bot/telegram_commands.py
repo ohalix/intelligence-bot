@@ -523,3 +523,7 @@ async def cmd_sources(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
     )
+
+
+async def telegram_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    logger.exception("Unhandled Telegram update error", exc_info=context.error)
