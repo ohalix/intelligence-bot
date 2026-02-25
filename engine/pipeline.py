@@ -2,6 +2,8 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
+import aiohttp
+
 from ingestion.ecosystem_ingest import EcosystemIngester
 from ingestion.funding_ingest import FundingIngester
 from ingestion.github_ingest import GitHubIngester
@@ -13,6 +15,7 @@ from processing.sentiment_analyzer import SentimentAnalyzer
 from processing.signal_ranker import SignalRanker
 from storage.sqlite_store import SQLiteStore
 from intelligence.market_state_classifier import MarketStateClassifier
+from utils.http import make_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -63,35 +66,35 @@ def _sentiment_type_breakdown(signals: List[Dict[str, Any]]) -> Dict[str, int]:
 async def run_pipeline(
     config: Dict[str, Any],
     store: SQLiteStore,
-    since: datetime | None = None,
+    since: datetime,
     manual: bool = False,
-    since_override: datetime | None = None,
 ) -> Dict[str, Any]:
-    if since_override is not None:
-        since = since_override
-    if since is None:
-        since = rolling_since(config, store)
     logger.info("Pipeline start. since=%s manual=%s", since.isoformat(), manual)
-
-    ingesters = [
-        NewsIngester(config),
-        GitHubIngester(config),
-        FundingIngester(config),
-        EcosystemIngester(config),
-        TwitterIngester(config),
-    ]
 
     raw_signals: List[Dict[str, Any]] = []
     ingestion_counts: Dict[str, int] = {}
-    for ing in ingesters:
-        try:
-            items = await ing.fetch(since)
-            raw_signals.extend(items)
-            ingestion_counts[ing.__class__.__name__] = len(items)
-            logger.info("Ingested %s from %s", len(items), ing.__class__.__name__)
-        except Exception as e:
-            logger.exception("Ingester failed: %s", e)
-            ingestion_counts[ing.__class__.__name__] = 0
+
+    timeout = make_timeout(config)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        # Web/API ingesters in the current repo require a shared aiohttp session
+        # injection. TwitterIngester keeps its existing constructor contract.
+        ingesters = [
+            NewsIngester(config, session),
+            GitHubIngester(config, session),
+            FundingIngester(config, session),
+            EcosystemIngester(config, session),
+            TwitterIngester(config),
+        ]
+
+        for ing in ingesters:
+            try:
+                items = await ing.fetch(since)
+                raw_signals.extend(items)
+                ingestion_counts[ing.__class__.__name__] = len(items)
+                logger.info("Ingested %s from %s", len(items), ing.__class__.__name__)
+            except Exception as e:
+                logger.exception("Ingester failed: %s", e)
+                ingestion_counts[ing.__class__.__name__] = 0
 
     total_seen = len(raw_signals)
     normalized = [_normalize_signal(s) for s in raw_signals]
