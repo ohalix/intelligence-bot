@@ -19,12 +19,16 @@ class SignalRanker:
     """
 
     def __init__(self, weights: Optional[Dict[str, float]] = None):
-        self.weights = weights or {
+        # Compatibility: callers may pass the full config dict.
+        if isinstance(weights, dict) and any(k in weights for k in ("bot", "storage", "ingestion", "analysis")):
+            cfg = weights
+            weights = (cfg.get("ranking") or {}).get("weights")  # type: ignore[assignment]
+        self.weights = (weights or {
             "source": 1.0,
             "recency": 1.0,
             "keyword": 1.0,
             "sentiment": 0.5,
-        }
+        })
 
     def rank(self, signals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Public API expected by engine.pipeline.
