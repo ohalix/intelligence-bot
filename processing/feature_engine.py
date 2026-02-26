@@ -3,14 +3,14 @@ from typing import Any, Dict, Tuple
 
 def _match_keywords(text: str, keyword_sets: Dict[str, Dict[str, Any]]) -> Tuple[str, float]:
     t = (text or "").lower()
-    best = ("unknown", 1.0)
+    # FIX item 7: init best score at 0.0 so multiplier==1.0 ecosystems can win
+    best = ("unknown", 0.0)
     for name, meta in keyword_sets.items():
         kws = [k.lower() for k in meta.get("keywords", [])]
         hits = sum(1 for k in kws if k in t)
         if hits > 0:
-            # simple score proxy
             mult = float(meta.get("multiplier", 1.0))
-            if mult > best[1]:
+            if mult >= best[1]:
                 best = (name, mult)
     return best[0], best[1]
 
