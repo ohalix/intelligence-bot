@@ -214,10 +214,10 @@ async def cmd_rawsignals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 def _window_since(cfg) -> "datetime":
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
     hours = int(cfg.get("storage", {}).get("rolling_window_hours", 24))
-    return datetime.utcnow() - timedelta(hours=hours)
+    return datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=hours)
 
 
 def _section_limit(cfg) -> int:
@@ -377,9 +377,9 @@ def _manual_run_meta_key_utc() -> str:
     Uses UTC date to be consistent across deployments.
     """
 
-    from datetime import datetime
+    from datetime import datetime, timezone
 
-    return f"manual_run_count:{datetime.utcnow().strftime('%Y-%m-%d')}"
+    return f"manual_run_count:{datetime.now(timezone.utc).replace(tzinfo=None).strftime('%Y-%m-%d')}"
 
 
 def _get_manual_run_count(store: SQLiteStore) -> int:
@@ -436,9 +436,9 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    from datetime import datetime, timedelta
+    from datetime import datetime, timedelta, timezone
 
-    since = datetime.utcnow() - timedelta(hours=24)
+    since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=24)
     log.info("Manual /run triggered: since=%s remaining_runs=%s", since.isoformat(), remaining - 1)
 
     # Reserve a slot before running (prevents double-spend if the process crashes mid-run).
@@ -506,30 +506,55 @@ def _read_sources_from_module(mod_path: str, candidates: list[str]) -> tuple[str
 async def cmd_sources(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show currently configured ingestion sources.
 
-    Minimal compatibility handler to satisfy imports/registrations.
+    FIX item 4: Reads from runtime config["ingestion"] for accuracy instead of
+    guessing module-level constants (which may not match what's actually used).
     """
+    config = context.bot_data.get("config", {})
+    ing = config.get("ingestion", {})
 
-    mappings = [
-        ("ingestion.twitter_ingest", ["ACCOUNTS", "TWITTER_ACCOUNTS", "TWITTER_USERS", "SOURCES", "FEEDS"]),
-        ("ingestion.news_ingest", ["NEWS_FEEDS", "SOURCES", "FEEDS"]),
-        ("ingestion.github_ingest", ["GITHUB_REPOS", "REPOS", "TOPICS", "ORGS", "SOURCES"]),
-        ("ingestion.funding_ingest", ["FUNDING_FEEDS", "SOURCES", "FEEDS"]),
-        ("ingestion.ecosystem_ingest", ["ECOSYSTEM_FEEDS", "SOURCES", "FEEDS"]),
+    # Map of (section_label, config_keys, env_var_hints)
+    sections = [
+        ("News RSS", "news_sources", "NEWS_SOURCES / NEWS_RSS_EXTRA_SOURCES"),
+        ("News Web", "news_web_sources", "NEWS_WEB_SOURCES / NEWS_WEB_EXTRA_SOURCES"),
+        ("News API", "news_api_sources", "NEWS_API_SOURCES / NEWS_API_EXTRA_SOURCES"),
+        ("Funding RSS", "funding_rss_sources", "FUNDING_RSS_SOURCES / FUNDING_RSS_EXTRA_SOURCES"),
+        ("Funding Web", "funding_web_sources", "FUNDING_WEB_SOURCES / FUNDING_WEB_EXTRA_SOURCES"),
+        ("Funding API", "funding_api_sources", "FUNDING_API_SOURCES / FUNDING_API_EXTRA_SOURCES"),
+        ("Ecosystem RSS", "ecosystem_rss_sources", "ECOSYSTEM_RSS_SOURCES / ECOSYSTEM_RSS_EXTRA_SOURCES"),
+        ("Ecosystem Web", "ecosystem_web_sources", "ECOSYSTEM_WEB_SOURCES / ECOSYSTEM_WEB_EXTRA_SOURCES"),
+        ("Ecosystem API", "ecosystem_api_sources", "ECOSYSTEM_API_SOURCES / ECOSYSTEM_API_EXTRA_SOURCES"),
+        ("Snapshot Spaces", "snapshot_spaces", "ECOSYSTEM_SNAPSHOT_SPACES"),
+        ("GitHub Queries", "github_queries", "GITHUB_QUERIES / GITHUB_EXTRA_QUERIES"),
+        ("Twitter Mode", "twitter_mode", "TWITTER_MODE"),
+        ("Twitter RSS", "twitter_rss_sources", "TWITTER_RSS_SOURCES"),
     ]
 
-    lines: list[str] = ["<b>Current ingestion sources</b>", ""]
-    for mod_path, candidates in mappings:
-        label, sources = _read_sources_from_module(mod_path, candidates)
-        header = mod_path.split(".")[-1].replace("_ingest", "").replace("_", " ").title()
-        lines.append(f"<b>{html.escape(header)}</b>")
-        if sources:
-            lines.append(f"<i>{html.escape(label)}</i>")
-            for s in sources[:50]:
-                lines.append(f"• {html.escape(s)}")
-            if len(sources) > 50:
-                lines.append(f"… (+{len(sources) - 50} more)")
+    # GitHub queries live under config.github.queries
+    github_queries = config.get("github", {}).get("queries", [])
+
+    lines: list[str] = ["<b>Current ingestion sources (runtime config)</b>", ""]
+    for label, key, env_hint in sections:
+        if key == "github_queries":
+            sources = github_queries
         else:
-            lines.append("(no sources found)")
+            val = ing.get(key)
+            if val is None:
+                continue
+            if isinstance(val, str):
+                sources = [val]
+            elif isinstance(val, list):
+                sources = [str(s) for s in val]
+            else:
+                sources = [str(val)]
+
+        lines.append(f"<b>{html.escape(label)}</b> <i>(env: {html.escape(env_hint)})</i>")
+        if sources:
+            for s in sources[:20]:
+                lines.append(f"• {html.escape(str(s))}")
+            if len(sources) > 20:
+                lines.append(f"… (+{len(sources) - 20} more)")
+        else:
+            lines.append("(none configured)")
         lines.append("")
 
     await _safe_reply(

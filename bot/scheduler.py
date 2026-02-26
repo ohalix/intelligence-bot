@@ -6,7 +6,7 @@ from typing import Any, Dict
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
-from engine.pipeline import run_pipeline, send_dailybrief
+from engine.pipeline import run_pipeline
 from storage.sqlite_store import SQLiteStore
 
 logger = logging.getLogger(__name__)
@@ -29,7 +29,6 @@ def start_scheduler(
     async def job():
         try:
             await run_pipeline(config, store, manual=False)
-            await send_dailybrief(config, store, app.bot)
             logger.info("Scheduled daily run completed.")
         except Exception as e:
             logger.exception(f"Scheduled run failed: {e}")
