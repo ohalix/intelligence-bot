@@ -40,8 +40,9 @@ DEFAULT_ECOSYSTEM_WEB_SOURCES = [
 DEFAULT_ECOSYSTEM_API_SOURCES = [
     # Public, no-key: Snapshot Hub GraphQL (governance proposals)
     "snapshot_proposals",
-    # Public, no-key: DefiLlama open API (ecosystem metrics signals)
-    "defillama_chain_tvl",
+    # NOTE: defillama_chain_tvl removed from defaults — it was a no-op returning []
+    # and was misleading in /sources output. Can be re-enabled via ECOSYSTEM_API_SOURCES env var
+    # once a proper schema is defined.
 ]
 
 # Funding

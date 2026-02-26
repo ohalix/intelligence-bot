@@ -1,27 +1,32 @@
-"""Minimal, polite web scraping utilities.
+"""Polite web scraping utilities.
 
-Design goals:
+FIX item 10: Use BeautifulSoup for anchor extraction instead of regex-based
+lowercased HTML scan. This correctly handles single/double/unquoted quotes and
+preserves URL case (never lowercases href values).
+
+Design principles:
 - Async, safe timeouts
-- Rate limit per domain
-- Small cache (24h) to avoid refetching
-- Very lightweight parsing: title + a[href] anchors
-
-This is a fallback/augment layer when RSS is missing/broken/blocked.
+- Per-domain rate limiting
+- 24h cache to avoid refetching
+- BeautifulSoup for robust anchor extraction
 """
-
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin, urlparse
 
+from bs4 import BeautifulSoup
+
 from utils.http import fetch_text
 
+logger = logging.getLogger(__name__)
 
 @dataclass
 class ScrapeItem:
@@ -32,9 +37,10 @@ class ScrapeItem:
 CACHE_DIR = os.path.join(".cache", "web")
 DEFAULT_CACHE_TTL_SEC = 24 * 60 * 60
 
-# Per-domain rate limiting state
 _DOMAIN_LOCKS: dict[str, asyncio.Lock] = {}
 _DOMAIN_LAST_TS: dict[str, float] = {}
+
+DEFAULT_BOT_UA = "Mozilla/5.0 (compatible; IntelBot/1.0; +https://github.com/intel-bot)"
 
 
 def _cache_path(url: str) -> str:
@@ -72,8 +78,7 @@ async def fetch_cached_html(
     cache_ttl_sec: int = DEFAULT_CACHE_TTL_SEC,
     min_delay_sec: float = 1.0,
 ) -> str:
-    """Fetch HTML with a small cache and per-domain rate limiting."""
-
+    """Fetch HTML with cache and per-domain rate limiting."""
     cached = _read_cache(url, cache_ttl_sec)
     if cached is not None:
         return cached
@@ -88,9 +93,9 @@ async def fetch_cached_html(
         if sleep_for:
             await asyncio.sleep(sleep_for)
 
+        # FIX item 14: always include User-Agent
         headers = {
-            # Keep UA simple and honest; no bypass intent.
-            "User-Agent": "Mozilla/5.0 (compatible; IntelBot/1.0; +https://example.com/bot)",
+            "User-Agent": DEFAULT_BOT_UA,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         }
         content = await fetch_text(session, url, headers=headers)
@@ -101,82 +106,46 @@ async def fetch_cached_html(
 
 
 def _extract_anchors(html_text: str, base_url: str) -> List[ScrapeItem]:
-    """Very small HTML anchor extractor.
+    """Extract anchor links using BeautifulSoup.
 
-    We intentionally avoid site-specific selectors and heavy dependencies.
-    This is a heuristic fallback to capture *some* recent links.
+    FIX item 10: Never lowercase the HTML before extraction (was corrupting URLs).
+    BeautifulSoup handles all quote styles (single, double, none) natively.
     """
+    try:
+        soup = BeautifulSoup(html_text, "html.parser")
+    except Exception as exc:
+        logger.debug("BeautifulSoup parse error for %s: %s", base_url, exc)
+        return []
 
     items: List[ScrapeItem] = []
+    seen: set[str] = set()
 
-    # Basic scanning for <a ... href="...">Title</a>
-    lower = html_text
-    pos = 0
-    while True:
-        a = lower.find("<a", pos)
-        if a == -1:
-            break
-        href_idx = lower.find("href=", a)
-        if href_idx == -1:
-            pos = a + 2
-            continue
-        q = lower.find('"', href_idx)
-        if q == -1:
-            pos = href_idx + 5
-            continue
-        q2 = lower.find('"', q + 1)
-        if q2 == -1:
-            pos = q + 1
-            continue
-        href = lower[q + 1 : q2].strip()
-
-        # Extract anchor text (best effort)
-        gt = lower.find(">", q2)
-        if gt == -1:
-            pos = q2 + 1
-            continue
-        end = lower.find("</a>", gt)
-        if end == -1:
-            pos = gt + 1
-            continue
-        text = lower[gt + 1 : end]
-
-        # Strip tags and whitespace
-        text = " ".join(text.replace("&nbsp;", " ").split())
-        # Remove any remaining tags crudely
-        while "<" in text and ">" in text:
-            l = text.find("<")
-            r = text.find(">", l)
-            if r == -1:
-                break
-            text = (text[:l] + " " + text[r + 1 :]).strip()
-
-        pos = end + 4
-
+    for tag in soup.find_all("a", href=True):
+        # href is preserved as-is (not lowercased)
+        href = tag.get("href", "").strip()
         if not href or href.startswith("#"):
             continue
         if href.startswith("mailto:") or href.startswith("javascript:"):
             continue
 
-        full = urljoin(base_url, href)
+        full_url = urljoin(base_url, href)
+
+        # Get visible text
+        text = tag.get_text(separator=" ", strip=True)
+        text = " ".join(text.split())
+
         if len(text) < 8:
             continue
-
-        items.append(ScrapeItem(title=text[:200], url=full))
-
-    # Deduplicate by url
-    seen = set()
-    out: List[ScrapeItem] = []
-    for it in items:
-        if it.url in seen:
+        if full_url in seen:
             continue
-        seen.add(it.url)
-        out.append(it)
-    return out
+        seen.add(full_url)
+        items.append(ScrapeItem(title=text[:200], url=full_url))
+
+    return items
 
 
 def _relevance_filter(items: List[ScrapeItem], base_url: str) -> List[ScrapeItem]:
-    """Keep likely 'post' links and same-domain links."""
+    """Keep likely 'post' links on same domain."""
     base_netloc = urlparse(base_url).netloc
     out: List[ScrapeItem] = []
     for it in items:
@@ -197,12 +166,9 @@ async def scrape_page_links(
     cache_ttl_sec: int = DEFAULT_CACHE_TTL_SEC,
 ) -> List[Dict[str, Any]]:
     """Scrape a page for candidate post links."""
-
     html_text = await fetch_cached_html(session, url, cache_ttl_sec=cache_ttl_sec)
     anchors = _extract_anchors(html_text, url)
     anchors = _relevance_filter(anchors, url)
-
-    # Return as raw signals (title/url)
     out: List[Dict[str, Any]] = []
     for it in anchors[:max_items]:
         out.append({"title": it.title, "url": it.url})
