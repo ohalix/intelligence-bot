@@ -12,7 +12,7 @@ It is a developer tool only.
 """
 
 import asyncio
-from datetime import datetime, timedelta, UTC
+from datetime import datetime, timedelta
 
 try:
     from ingestion.news_ingest import NewsIngester
@@ -21,8 +21,10 @@ try:
     from ingestion.github_ingest import GitHubIngester
     from bot.formatter import format_dailybrief_html, format_section_html
 except ModuleNotFoundError as e:
+    # Developer tool: fail with a clear message instead of a traceback.
     missing = getattr(e, "name", str(e))
-    print(f"Regression harness dependency missing: {missing}. Install app/test dependencies and retry.", file=sys.stderr)
+    print(f"Dependency missing for regression harness: {missing}.")
+    print("Install requirements.txt into your venv, then rerun this script.")
     raise SystemExit(2)
 
 
@@ -68,30 +70,30 @@ class DummyResp:
     async def json(self):
         # Minimal JSON responses for API ingesters
         if "cryptocurrency.cv" in self.url:
-            from datetime import datetime, timedelta, UTC
+            from datetime import datetime, timedelta
             return [
                 {
                     "title": "API News Item",
                     "url": "https://example.com/api-news",
                     "description": "api desc",
                     # Keep relative so the harness doesn't become stale.
-                    "published_at": (datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=1)).isoformat() + "Z",
+                    "published_at": (datetime.utcnow() - timedelta(hours=1)).isoformat() + "Z",
                 }
             ]
         if "pro-api.coinmarketcap.com" in self.url:
-            from datetime import datetime, timedelta, UTC
+            from datetime import datetime, timedelta
             return {
                 "data": [
                     {
                         "title": "CMC Post",
                         "url": "https://example.com/cmc",
                         "subtitle": "sub",
-                        "created_at": (datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=1)).isoformat() + "Z",
+                        "created_at": (datetime.utcnow() - timedelta(hours=1)).isoformat() + "Z",
                     }
                 ]
             }
         if "api.llama.fi/raises" in self.url:
-            from datetime import datetime, timedelta, UTC
+            from datetime import datetime, timedelta
             return {
                 "raises": [
                     {
@@ -99,7 +101,7 @@ class DummyResp:
                         "round": "Seed",
                         "amount": 5000000,
                         "link": "https://example.com/raise",
-                        "date": (datetime.now(UTC).replace(tzinfo=None) - timedelta(hours=2)).date().isoformat(),
+                        "date": (datetime.utcnow() - timedelta(hours=2)).date().isoformat(),
                     }
                 ]
             }
@@ -124,7 +126,7 @@ async def run_once() -> None:
         "github": {"queries": [], "concurrency": 1},
     }
 
-    since = datetime.now(UTC).replace(tzinfo=None) - timedelta(days=3)
+    since = datetime.utcnow() - timedelta(days=3)
     sess = DummySession()
 
     news = NewsIngester(cfg, sess)

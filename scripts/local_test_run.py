@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from utils.config import load_config
 from utils.logging import setup_logging
 from storage.sqlite_store import SQLiteStore
-from engine.pipeline import run_pipeline, build_daily_payload, compute_analysis
+from engine.pipeline import run_pipeline, build_daily_payload
 from processing.deduplicator import Deduplicator
 from processing.feature_engine import FeatureEngine
 from processing.sentiment_analyzer import SentimentAnalyzer
@@ -35,8 +35,9 @@ def seed_demo_signals(cfg, store):
 async def run():
     cfg = load_config()
     setup_logging(cfg)
-    store = SQLiteStore(cfg.get("storage", {}).get("database_path", "./data/web3_intelligence.db"))
-    result = await run_pipeline(cfg, store, manual=True)
+    store = SQLiteStore(cfg.get("storage", {}).get("db_path") or cfg.get("storage", {}).get("database_path", "./data/web3_intelligence.db"))
+    since = datetime.utcnow() - timedelta(hours=24)
+    _ = await run_pipeline(cfg, store, since=since, manual=True)
 
     # If offline / no ingestion results, seed demo signals so you can validate formatting end-to-end.
     since = datetime.utcnow() - timedelta(hours=int(cfg.get("storage", {}).get("rolling_window_hours", 24)))
@@ -44,9 +45,8 @@ async def run():
         seed_demo_signals(cfg, store)
 
     payload = build_daily_payload(cfg, store, include_sections=True)
-    payload["analysis"] = await compute_analysis(cfg, payload)
-    from bot.formatter import format_dailybrief
-    print(format_dailybrief(payload))
+    from bot.formatter import format_dailybrief_html
+    print(format_dailybrief_html(payload))
 
 if __name__ == "__main__":
     asyncio.run(run())
