@@ -71,6 +71,9 @@ class SQLiteStore:
             )
             """
         )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_published_at ON signals(published_at)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_url ON signals(url)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_source ON signals(source)")
         cur.execute(
             """
             CREATE TABLE IF NOT EXISTS meta (
@@ -88,64 +91,18 @@ class SQLiteStore:
             """
         )
         self.conn.commit()
-        self._ensure_signals_schema_compat()
 
-    def _ensure_signals_schema_compat(self):
+    def _migrate(self):
         cur = self.conn.cursor()
         cur.execute("PRAGMA table_info(signals)")
         cols = {row[1] for row in cur.fetchall()}
-
-        missing_cols = []
-        if "published_at" not in cols:
-            cur.execute("ALTER TABLE signals ADD COLUMN published_at TEXT")
-            missing_cols.append("published_at")
         if "ecosystem" not in cols:
             cur.execute("ALTER TABLE signals ADD COLUMN ecosystem TEXT")
-            missing_cols.append("ecosystem")
         if "tags" not in cols:
             cur.execute("ALTER TABLE signals ADD COLUMN tags TEXT")
-            missing_cols.append("tags")
         if "raw_json" not in cols:
             cur.execute("ALTER TABLE signals ADD COLUMN raw_json TEXT")
-            missing_cols.append("raw_json")
-
-        # Refresh column set after potential ALTER TABLE statements.
-        if missing_cols:
-            cur.execute("PRAGMA table_info(signals)")
-            cols = {row[1] for row in cur.fetchall()}
-
-        if "published_at" in cols:
-            backfill_candidates = [
-                "created_at",
-                "timestamp",
-                "ts",
-                "inserted_at",
-                "seen_at",
-                "date",
-                "published",
-            ]
-            backfill_col = next((c for c in backfill_candidates if c in cols), None)
-            if backfill_col:
-                cur.execute(
-                    f"UPDATE signals SET published_at = COALESCE(published_at, {backfill_col}) WHERE published_at IS NULL"
-                )
-            else:
-                pass
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_published_at ON signals(published_at)")
-        if "url" in cols:
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_url ON signals(url)")
-        if "source" in cols:
-            cur.execute("CREATE INDEX IF NOT EXISTS idx_signals_source ON signals(source)")
-
         self.conn.commit()
-
-    def _migrate(self):
-        self._ensure_signals_schema_compat()
-
-    def _signals_columns(self) -> set[str]:
-        cur = self.conn.cursor()
-        cur.execute("PRAGMA table_info(signals)")
-        return {str(row[1]) for row in cur.fetchall()}
 
     def insert_signals(self, signals: List[Dict[str, Any]]) -> int:
         cur = self.conn.cursor()
@@ -200,34 +157,27 @@ class SQLiteStore:
         self.conn.commit()
         return inserted
 
-    def get_signals_since(self, since: datetime, signal_type: Optional[str] = None, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    def get_signals_since(self, since: datetime, source: Optional[str] = None, limit: Optional[int] = None) -> List[Dict[str, Any]]:
         if since.tzinfo is not None:
             since = since.astimezone(timezone.utc).replace(tzinfo=None)
-
-        cols = self._signals_columns()
-        has_id = "id" in cols
-        id_expr = "id" if has_id else "rowid AS id"
-        order_id = "id" if has_id else "rowid"
-
-        select_cols = [id_expr, "title", "url", "source"]
-        if "signal_type" in cols:
-            select_cols.append("signal_type")
-        select_cols.extend(["description", "published_at", "score", "sentiment", "ecosystem", "tags", "raw_json"])
-
-        query = f"SELECT {', '.join(select_cols)} FROM signals WHERE published_at >= ?"
-        params: list[Any] = [since.isoformat()]
-
-        if signal_type and "signal_type" in cols:
-            query += " AND signal_type = ?"
-            params.append(signal_type)
-
-        query += f" ORDER BY COALESCE(score, 0) DESC, published_at DESC, {order_id} DESC"
-        if isinstance(limit, int) and limit > 0:
-            query += " LIMIT ?"
-            params.append(limit)
-
         cur = self.conn.cursor()
-        cur.execute(query, tuple(params))
+        params: list[Any] = [since.isoformat()]
+        where = "published_at >= ?"
+        if source:
+            where += " AND source = ?"
+            params.append(str(source))
+
+        q = f"""
+            SELECT id, title, url, source, description, published_at, score, sentiment, ecosystem, tags, raw_json
+            FROM signals
+            WHERE {where}
+            ORDER BY COALESCE(score, 0) DESC, published_at DESC
+        """
+        if limit is not None:
+            q += " LIMIT ?"
+            params.append(int(limit))
+
+        cur.execute(q, tuple(params))
         rows = cur.fetchall()
         out: List[Dict[str, Any]] = []
         for r in rows:
@@ -243,7 +193,6 @@ class SQLiteStore:
                     "title": r["title"],
                     "url": r["url"],
                     "source": r["source"],
-                    "signal_type": (r["signal_type"] if "signal_type" in r.keys() else None),
                     "description": r["description"] or "",
                     "published_at": r["published_at"],
                     "score": r["score"] if r["score"] is not None else 0.0,
@@ -253,6 +202,36 @@ class SQLiteStore:
                 }
             )
         return out
+
+    # -------------------------
+    # Compatibility helpers
+    # -------------------------
+
+    def upsert_signals(self, signals: List[Dict[str, Any]]) -> int:
+        """Compatibility alias used by developer scripts.
+
+        We keep behavior consistent with insert_signals (skip duplicate URLs).
+        """
+        return self.insert_signals(signals)
+
+    def set_meta(self, key: str, value: str) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO meta (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value
+            """,
+            (str(key), str(value)),
+        )
+        self.conn.commit()
+
+    def get_meta(self, key: str) -> Optional[str]:
+        cur = self.conn.cursor()
+        cur.execute("SELECT value FROM meta WHERE key = ?", (str(key),))
+        row = cur.fetchone()
+        if not row:
+            return None
+        return str(row["value"]) if row["value"] is not None else None
 
     def purge_older_than(self, days: int = 30) -> int:
         cutoff = _utcnow_naive() - timedelta(days=int(days))
@@ -291,24 +270,6 @@ class SQLiteStore:
             return dt
         except Exception:
             return None
-
-
-    def get_meta(self, key: str, default: Optional[str] = None) -> Optional[str]:
-        cur = self.conn.cursor()
-        cur.execute("SELECT value FROM meta WHERE key = ?", (key,))
-        row = cur.fetchone()
-        return default if not row else row["value"]
-
-    def set_meta(self, key: str, value: str) -> None:
-        cur = self.conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO meta (key, value) VALUES (?, ?)
-            ON CONFLICT(key) DO UPDATE SET value=excluded.value
-            """,
-            (key, str(value)),
-        )
-        self.conn.commit()
 
     def get_manual_run_count(self, run_date: str) -> int:
         cur = self.conn.cursor()
