@@ -1,6 +1,6 @@
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import aiohttp
 
@@ -9,12 +9,13 @@ from ingestion.funding_ingest import FundingIngester
 from ingestion.github_ingest import GitHubIngester
 from ingestion.news_ingest import NewsIngester
 from ingestion.twitter_ingest import TwitterIngester
+from intelligence.market_state_classifier import MarketStateClassifier
+from intelligence.trend_detector import TrendDetector
 from processing.deduplicator import Deduplicator
 from processing.feature_engine import FeatureEngine
 from processing.sentiment_analyzer import SentimentAnalyzer
 from processing.signal_ranker import SignalRanker
 from storage.sqlite_store import SQLiteStore
-from intelligence.market_state_classifier import MarketStateClassifier
 from utils.http import make_timeout
 
 logger = logging.getLogger(__name__)
@@ -40,8 +41,13 @@ def _normalize_signal(sig: Dict[str, Any]) -> Dict[str, Any]:
     out.setdefault("description", "")
     out.setdefault("ecosystem", "")
     out.setdefault("tags", [])
+    # Accept both legacy 'timestamp' (datetime) and 'published_at' (ISO str).
     if not out.get("published_at"):
-        out["published_at"] = datetime.utcnow().isoformat()
+        ts = out.get("timestamp")
+        if isinstance(ts, datetime):
+            out["published_at"] = ts.replace(tzinfo=None).isoformat()
+        else:
+            out["published_at"] = _utcnow_naive().isoformat()
     if not isinstance(out.get("tags"), list):
         out["tags"] = [str(out["tags"])]
     return out
@@ -66,15 +72,18 @@ def _sentiment_type_breakdown(signals: List[Dict[str, Any]]) -> Dict[str, int]:
 async def run_pipeline(
     config: Dict[str, Any],
     store: SQLiteStore,
-    since: datetime | None = None,
+    since: Optional[datetime] = None,
     manual: bool = False,
-    since_override: datetime | None = None,
+    since_override: Optional[datetime] = None,
 ) -> Dict[str, Any]:
-    effective_since = since_override or since or (_utcnow_naive() - timedelta(hours=24))
-    logger.info("Pipeline start. since=%s manual=%s", effective_since.isoformat(), manual)
+    # Compatibility: support both legacy positional since and newer since_override kwarg.
+    effective_since = since_override or since
+    if effective_since is None:
+        effective_since = _utcnow_naive() - timedelta(hours=24)
+    if effective_since.tzinfo is not None:
+        effective_since = effective_since.astimezone(timezone.utc).replace(tzinfo=None)
 
-    raw_signals: List[Dict[str, Any]] = []
-    ingestion_counts: Dict[str, int] = {}
+    logger.info("Pipeline start. since=%s manual=%s", effective_since.isoformat(), manual)
 
     timeout = make_timeout(config)
     async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -83,15 +92,15 @@ async def run_pipeline(
             GitHubIngester(config, session),
             FundingIngester(config, session),
             EcosystemIngester(config, session),
-            TwitterIngester(config),
+            TwitterIngester(config, session),
         ]
 
+        raw_signals: List[Dict[str, Any]] = []
+        ingestion_counts: Dict[str, int] = {}
         for ing in ingesters:
             try:
-                ingest_fn = getattr(ing, "ingest", None)
-                if ingest_fn is None:
-                    raise AttributeError(f"{ing.__class__.__name__} missing ingest()")
-                items = await ingest_fn(effective_since)
+                # All ingesters implement .ingest(since). Keep the name stable.
+                items = await ing.ingest(effective_since)
                 raw_signals.extend(items)
                 ingestion_counts[ing.__class__.__name__] = len(items)
                 logger.info("Ingested %s from %s", len(items), ing.__class__.__name__)
@@ -99,56 +108,77 @@ async def run_pipeline(
                 logger.exception("Ingester failed: %s", e)
                 ingestion_counts[ing.__class__.__name__] = 0
 
-    total_seen = len(raw_signals)
-    normalized = [_normalize_signal(s) for s in raw_signals]
+        total_seen = len(raw_signals)
+        normalized = [_normalize_signal(s) for s in raw_signals]
 
-    deduper = Deduplicator(config)
-    deduped = deduper.dedup(normalized)
-    logger.info("Dedup: kept=%s dropped=%s", len(deduped), max(0, len(normalized) - len(deduped)))
+        deduper = Deduplicator()
+        deduped = deduper.dedup(normalized)
+        logger.info("Dedup: kept=%s dropped=%s", len(deduped), max(0, len(normalized) - len(deduped)))
 
-    fe = FeatureEngine(config)
-    enriched = fe.enrich(deduped)
+        fe = FeatureEngine(config.get("ecosystems", {}) or {})
+        enriched = [fe.enrich(s) for s in deduped]
 
-    sa = SentimentAnalyzer(config)
-    with_sent = sa.add_sentiment(enriched)
-    logger.info("Sentiment types: %s", _sentiment_type_breakdown(with_sent))
+        sa = SentimentAnalyzer(config)
+        with_sent = sa.add_sentiment(enriched)
+        logger.info("Sentiment types: %s", _sentiment_type_breakdown(with_sent))
 
-    ranker = SignalRanker(config)
-    ranked = ranker.rank(with_sent)
+        # Ranker accepts either weights dict or a config dict (compat).
+        ranker = SignalRanker(config)
+        ranked = ranker.rank(with_sent)
 
-    inserted = store.insert_signals(ranked)
-    store.set_last_run(_utcnow_naive())
-    logger.info("Stored inserted=%s total_seen=%s", inserted, total_seen)
+        # Ensure store-compatible fields exist.
+        for s in ranked:
+            if "score" not in s and "signal_score" in s:
+                s["score"] = s.get("signal_score")
 
-    return {
-        "ingestion_counts": ingestion_counts,
-        "total_seen": total_seen,
-        "kept": len(deduped),
-        "inserted": inserted,
-    }
+        inserted = store.insert_signals(ranked)
+        store.set_last_run(_utcnow_naive())
+        logger.info("Stored inserted=%s total_seen=%s", inserted, total_seen)
+
+        return {
+            "ingestion_counts": ingestion_counts,
+            "total_seen": total_seen,
+            "count": total_seen,
+            "kept": len(deduped),
+            "inserted": inserted,
+        }
 
 
-def build_daily_payload(config: Dict[str, Any], store: SQLiteStore, max_signals: int | None = None) -> Dict[str, Any]:
+def build_daily_payload(
+    config: Dict[str, Any],
+    store: SQLiteStore,
+    max_signals: int | None = None,
+    include_sections: bool = True,
+) -> Dict[str, Any]:
     if max_signals is None:
         max_signals = int(config.get("analysis", {}).get("max_signals", 10))
 
     since = _utcnow_naive() - timedelta(hours=int(config.get("storage", {}).get("rolling_window_hours", 24)))
-    signals = store.get_signals_since(since)
-    classifier = MarketStateClassifier(config)
-    state = classifier.classify(signals)
-
+    # Store now supports (since, source=None, limit=None).
+    signals = store.get_signals_since(since, source=None, limit=None)
+    state = MarketStateClassifier().classify(signals)
     top = sorted(signals, key=lambda x: float(x.get("score", 0) or 0), reverse=True)[:max_signals]
 
-    by_source: Dict[str, List[Dict[str, Any]]] = {}
-    for s in signals:
-        by_source.setdefault(str(s.get("source", "unknown")), []).append(s)
+    sections: Dict[str, List[Dict[str, Any]]] = {}
+    if include_sections:
+        sections["Top Signals"] = top
+        # Keep stable section names expected by formatter.
+        for src, header in (
+            ("news", "News"),
+            ("funding", "Funding"),
+            ("ecosystem", "Ecosystem"),
+            ("github", "GitHub"),
+            ("twitter", "Twitter"),
+        ):
+            sections[header] = [s for s in signals if (s.get("source") or "").lower() == src][:max_signals]
+
+    trends = TrendDetector().detect(signals)
 
     return {
         "date": _utcnow_naive().strftime("%Y-%m-%d"),
         "since": since.isoformat(),
-        "market_state": state,
-        "top_signals": top,
-        "by_source": by_source,
-        "counts": {k: len(v) for k, v in by_source.items()},
+        "analysis": {"market_tone": state, "summary": None},
+        "sections": sections,
+        "inputs": {"trends": trends},
         "total_signals": len(signals),
     }
