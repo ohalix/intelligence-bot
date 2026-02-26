@@ -69,6 +69,9 @@ class EcosystemIngester:
             "web_attempted": 0,
             "web_success": 0,
             "web_fail": 0,
+            "api_attempted": 0,
+            "api_success": 0,
+            "api_fail": 0,
             "items": 0,
             "errors": {},
         }
@@ -79,13 +82,17 @@ class EcosystemIngester:
                 try:
                     content = await fetch_text(self.session, url)
                     parsed = feedparser.parse(content)
+                    # FIX item 16: bozo detection
+                    if getattr(parsed, "bozo", False):
+                        exc = getattr(parsed, "bozo_exception", None)
+                        logger.debug("EcosystemIngester RSS bozo=True for %s: %s", url, type(exc).__name__ if exc else "unknown")
                     out: List[Dict[str, Any]] = []
                     for entry in parsed.entries:
-                        published = getattr(entry, "published_parsed", None)
-                        if published:
-                            dt = datetime(*published[:6])
-                            if dt < since:
-                                continue
+                        # FIX item 5: timezone-aware date parsing
+                        from utils.http import parse_rss_entry_datetime as _parse_dt
+                        dt_entry = _parse_dt(entry)
+                        if dt_entry is not None and dt_entry < since:
+                            continue
                         out.append(
                             {
                                 "source": "ecosystem",
@@ -140,16 +147,17 @@ class EcosystemIngester:
 
         async def _api(name: str) -> List[Dict[str, Any]]:
             async with sem:
-                stats.setdefault("api_attempted", 0)
-                stats.setdefault("api_success", 0)
-                stats.setdefault("api_fail", 0)
                 stats["api_attempted"] += 1
                 try:
                     api = (name or "").strip().lower()
                     if api == "snapshot_proposals":
                         out = await governance_from_snapshot(self.session, since, list(snapshot_spaces))
                     elif api == "defillama_chain_tvl":
-                        # Implemented as no-op for now to avoid schema guessing.
+                        # FIX item 22: was a no-op returning []; now explicitly warns operator
+                        logger.warning(
+                            "defillama_chain_tvl is not implemented (no schema defined). "
+                            "Remove it from ECOSYSTEM_API_SOURCES to suppress this warning. Skipping."
+                        )
                         out = []
                     else:
                         logger.warning("Unknown ecosystem API source: %s", name)

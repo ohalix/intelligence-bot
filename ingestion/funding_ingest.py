@@ -6,7 +6,7 @@ from typing import Any, Dict, List
 import feedparser
 
 from ingestion.api_sources import funding_from_defillama_raises
-from utils.http import fetch_text
+from utils.http import fetch_text, fetch_rss_conditional, parse_rss_entry_datetime
 from utils.web_scraper import scrape_page_links
 
 logger = logging.getLogger(__name__)
@@ -49,13 +49,15 @@ class FundingIngester:
                 try:
                     content = await fetch_text(self.session, url)
                     parsed = feedparser.parse(content)
+                    # FIX item 16: bozo detection
+                    if getattr(parsed, "bozo", False):
+                        exc = getattr(parsed, "bozo_exception", None)
+                        logger.debug("Funding RSS bozo=True for %s: %s", url, type(exc).__name__ if exc else "unknown")
                     out: List[Dict[str, Any]] = []
                     for entry in parsed.entries:
-                        published = getattr(entry, "published_parsed", None) or getattr(entry, "updated_parsed", None)
-                        if published:
-                            dt = datetime(*published[:6])
-                            if dt < since:
-                                continue
+                        dt_entry = parse_rss_entry_datetime(entry)
+                        if dt_entry is not None and dt_entry < since:
+                            continue
                         out.append(
                             {
                                 "source": "funding",

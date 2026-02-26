@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import aiohttp
@@ -17,7 +17,7 @@ def _iso_or_none(v: Any) -> Optional[str]:
         return s or None
     try:
         if isinstance(v, (int, float)):
-            return datetime.utcfromtimestamp(float(v)).isoformat() + "Z"
+            return datetime.fromtimestamp(float(v, tz=timezone.utc).replace(tzinfo=None)).isoformat() + "Z"
     except Exception:
         return None
     return None
@@ -142,14 +142,23 @@ async def funding_from_defillama_raises(session: aiohttp.ClientSession, since: d
         if not published_at:
             continue
         # dates can be YYYY-MM-DD
+        # FIX item 21: date-only fields (YYYY-MM-DD) should be treated as whole day
         try:
             if len(published_at) == 10:
-                dt = datetime.fromisoformat(published_at)
+                # Date-only: treat as start of that day in UTC
+                dt = datetime.fromisoformat(published_at).replace(tzinfo=None)
+                # Filter: if the whole day is before 'since', skip
+                # Use end-of-day (23:59:59) to be inclusive
+                from datetime import time as _time
+                dt_end_of_day = datetime.combine(dt.date(), _time(23, 59, 59))
+                if dt_end_of_day < since:
+                    continue
+                dt = dt  # use start-of-day for published_at
             else:
                 dt = datetime.fromisoformat(published_at.replace("Z", "+00:00")).replace(tzinfo=None)
+                if dt < since:
+                    continue
         except Exception:
-            continue
-        if dt < since:
             continue
 
         name = (r.get("name") or r.get("project") or "").strip()
@@ -191,7 +200,12 @@ async def governance_from_snapshot(session: aiohttp.ClientSession, since: dateti
       }
     }
     """
-    created_gte = int(since.timestamp())
+    # FIX item 20: ensure UTC-aware timestamp conversion to avoid naive datetime issues
+    if since.tzinfo is None:
+        since_aware = since.replace(tzinfo=timezone.utc)
+    else:
+        since_aware = since
+    created_gte = int(since_aware.timestamp())
     payload = {"query": query, "variables": {"spaces": spaces, "created_gte": created_gte}}
     try:
         data = await fetch_json_post(session, endpoint, json_payload=payload)
@@ -208,7 +222,7 @@ async def governance_from_snapshot(session: aiohttp.ClientSession, since: dateti
             continue
         # created is epoch
         try:
-            dt = datetime.utcfromtimestamp(int(created))
+            dt = datetime.fromtimestamp(int(created, tz=timezone.utc).replace(tzinfo=None))
         except Exception:
             continue
         if dt < since:

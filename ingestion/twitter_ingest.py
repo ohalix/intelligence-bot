@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from .base_ingest import BaseIngester
@@ -39,7 +39,7 @@ class TwitterIngester(BaseIngester):
                             "title": title,
                             "description": getattr(entry, "summary", "") or "",
                             "url": link,
-                            "timestamp": published or datetime.utcnow(),
+                            "timestamp": published or datetime.now(timezone.utc).replace(tzinfo=None),
                             "source_name": getattr(parsed.feed, "title", "twitter"),
                         })
                 except Exception as e:
@@ -67,7 +67,7 @@ class TwitterIngester(BaseIngester):
             try:
                 ts = datetime.fromisoformat(created_at.replace("Z","+00:00")).replace(tzinfo=None)
             except Exception:
-                ts = datetime.utcnow()
+                ts = datetime.now(timezone.utc).replace(tzinfo=None)
             if ts <= since:
                 continue
             tid = t.get("id","")
