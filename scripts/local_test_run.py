@@ -17,10 +17,10 @@ from processing.signal_ranker import SignalRanker
 def seed_demo_signals(cfg, store):
     # Only used when running offline and nothing was ingested; keeps core bot behavior unchanged.
     demo = [
-        {"source":"news","type":"news_article","title":"New L2 announces testnet with novel data availability","description":"A new rollup stack claims lower fees using DA sampling.","url":"https://example.com/l2","timestamp":datetime.utcnow()},
-        {"source":"funding","type":"funding_announcement","title":"Infra startup raises seed to build on-chain indexer","description":"Team targets EVM + SVM with realtime analytics.","url":"https://example.com/funding","timestamp":datetime.utcnow()},
-        {"source":"github","type":"github_repo","title":"awesome-web3-agents","description":"Repo tracking agent frameworks and onchain tooling.","url":"https://github.com/example/awesome","timestamp":datetime.utcnow(),"stars":120,"forks":10,"language":"Python"},
-        {"source":"ecosystem","type":"ecosystem_announcement","title":"Ecosystem grants open for DeFi builders this quarter","description":"New grants program focuses on tooling and lending markets.","url":"https://example.com/grants","timestamp":datetime.utcnow()},
+        {"source":"news","type":"news_article","title":"New L2 announces testnet with novel data availability","description":"A new rollup stack claims lower fees using DA sampling.","url":"https://example.com/l2","timestamp":datetime.now(timezone.utc).replace(tzinfo=None)},
+        {"source":"funding","type":"funding_announcement","title":"Infra startup raises seed to build on-chain indexer","description":"Team targets EVM + SVM with realtime analytics.","url":"https://example.com/funding","timestamp":datetime.now(timezone.utc).replace(tzinfo=None)},
+        {"source":"github","type":"github_repo","title":"awesome-web3-agents","description":"Repo tracking agent frameworks and onchain tooling.","url":"https://github.com/example/awesome","timestamp":datetime.now(timezone.utc).replace(tzinfo=None),"stars":120,"forks":10,"language":"Python"},
+        {"source":"ecosystem","type":"ecosystem_announcement","title":"Ecosystem grants open for DeFi builders this quarter","description":"New grants program focuses on tooling and lending markets.","url":"https://example.com/grants","timestamp":datetime.now(timezone.utc).replace(tzinfo=None)},
     ]
     d = Deduplicator()
     f = FeatureEngine(cfg.get("ecosystems", {}))
@@ -36,11 +36,11 @@ async def run():
     cfg = load_config()
     setup_logging(cfg)
     store = SQLiteStore(cfg.get("storage", {}).get("db_path") or cfg.get("storage", {}).get("database_path", "./data/web3_intelligence.db"))
-    since = datetime.utcnow() - timedelta(hours=24)
+    since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=24)
     _ = await run_pipeline(cfg, store, since=since, manual=True)
 
     # If offline / no ingestion results, seed demo signals so you can validate formatting end-to-end.
-    since = datetime.utcnow() - timedelta(hours=int(cfg.get("storage", {}).get("rolling_window_hours", 24)))
+    since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=int(cfg.get("storage", {}).get("rolling_window_hours", 24)))
     if len(store.get_signals_since(since, None, limit=1)) == 0:
         seed_demo_signals(cfg, store)
 

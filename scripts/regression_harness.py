@@ -77,7 +77,7 @@ class DummyResp:
                     "url": "https://example.com/api-news",
                     "description": "api desc",
                     # Keep relative so the harness doesn't become stale.
-                    "published_at": (datetime.utcnow() - timedelta(hours=1)).isoformat() + "Z",
+                    "published_at": (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=1)).isoformat() + "Z",
                 }
             ]
         if "pro-api.coinmarketcap.com" in self.url:
@@ -88,7 +88,7 @@ class DummyResp:
                         "title": "CMC Post",
                         "url": "https://example.com/cmc",
                         "subtitle": "sub",
-                        "created_at": (datetime.utcnow() - timedelta(hours=1)).isoformat() + "Z",
+                        "created_at": (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=1)).isoformat() + "Z",
                     }
                 ]
             }
@@ -101,7 +101,7 @@ class DummyResp:
                         "round": "Seed",
                         "amount": 5000000,
                         "link": "https://example.com/raise",
-                        "date": (datetime.utcnow() - timedelta(hours=2)).date().isoformat(),
+                        "date": (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=2)).date().isoformat(),
                     }
                 ]
             }
@@ -126,7 +126,7 @@ async def run_once() -> None:
         "github": {"queries": [], "concurrency": 1},
     }
 
-    since = datetime.utcnow() - timedelta(days=3)
+    since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=3)
     sess = DummySession()
 
     news = NewsIngester(cfg, sess)
