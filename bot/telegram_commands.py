@@ -196,19 +196,19 @@ async def cmd_dailybrief(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         disable_web_page_preview=True,
     )
 
-
-# Backwards-compatible: keep /rawsignals simple.
+# Raw signals: show an ungrouped list (higher limit) without the daily brief wrapper.
 async def cmd_rawsignals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     store: SQLiteStore = context.application.bot_data.get("store")
     cfg = context.application.bot_data.get("config")
 
-    payload = build_daily_payload(cfg, store)
-    # Raw view uses MarkdownV2 for brevity; safe reply will fallback.
+    since = _window_since(cfg)
+    # Larger cap for raw dump, but still safe with chunking.
+    signals = store.get_signals_since(since, source=None, limit=50)
     await _safe_reply(
         update,
         context,
-        format_dailybrief(payload),
-        parse_mode=ParseMode.MARKDOWN_V2,
+        format_section_html("Raw Signals", signals),
+        parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
     )
 
@@ -329,6 +329,48 @@ async def cmd_newprojects(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     )
 
 
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Help/about command.
+
+    Kept intentionally simple and stable.
+    """
+
+    lines = [
+        "<b>Web3 Intelligence Bot</b>",
+        "", 
+        "Commands:",
+        "• /dailybrief — top signals + sections (last 24h)",
+        "• /news — news only", 
+        "• /funding — funding + ecosystem", 
+        "• /github — GitHub activity", 
+        "• /newprojects — twitter + github", 
+        "• /trends — chain × sector clusters", 
+        "• /rawsignals — ungrouped signal dump", 
+        "• /run — trigger ingestion now (rate-limited)",
+        "• /sources — show configured ingestion sources",
+    ]
+    await _safe_reply(
+        update,
+        context,
+        "\n".join(lines),
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True,
+    )
+
+
+async def telegram_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Global PTB error handler.
+
+    Must never raise.
+    """
+
+    try:
+        log.exception("Unhandled telegram error", exc_info=context.error)
+    except Exception:
+        # Absolute last resort: never crash on error handling.
+        pass
+
+
 def _manual_run_meta_key_utc() -> str:
     """Key used to persist manual /run counts in SQLite meta.
 
@@ -429,32 +471,6 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
 
-
-async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Compatibility help command used by main.py startup/handlers."""
-
-    text = (
-        "<b>Web3 Intelligence Bot</b>\n"
-        "Available commands:\n"
-        "• /dailybrief — daily brief summary\n"
-        "• /news — latest news signals\n"
-        "• /rawsignals — raw signal dump\n"
-        "• /trends — trend clusters\n"
-        "• /funding — funding & ecosystem signals\n"
-        "• /github — GitHub activity\n"
-        "• /newprojects — new project signals\n"
-        "• /sources — show configured sources\n"
-        "• /run — manual pipeline run (if enabled)"
-    )
-
-    await _safe_reply(
-        update,
-        context,
-        text,
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
-    )
-
 def _read_sources_from_module(mod_path: str, candidates: list[str]) -> tuple[str, list[str]]:
     """Best-effort extraction of sources from ingestion modules.
 
@@ -523,19 +539,3 @@ async def cmd_sources(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
     )
-
-
-async def telegram_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    try:
-        upd_type = type(update).__name__ if update is not None else None
-        user_id = getattr(getattr(update, "effective_user", None), "id", None)
-        chat_id = getattr(getattr(update, "effective_chat", None), "id", None)
-        log.exception(
-            "Unhandled Telegram update error update_type=%s user_id=%s chat_id=%s",
-            upd_type,
-            user_id,
-            chat_id,
-            exc_info=getattr(context, "error", None),
-        )
-    except Exception:
-        log.exception("Unhandled Telegram update error (fallback logging path)")
