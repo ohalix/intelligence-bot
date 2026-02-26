@@ -114,6 +114,7 @@ async def main():
     if cmd_run is not None:
         app.add_handler(CommandHandler("run", cmd_run))
 
+    # Global error handler for observability (must never crash).
     app.add_error_handler(telegram_error_handler)
 
     scheduler = AsyncIOScheduler()
