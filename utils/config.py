@@ -111,16 +111,17 @@ def load_config() -> Dict[str, Any]:
 
     config.setdefault("bot", {})
     config["bot"]["telegram_token"] = os.getenv("TELEGRAM_BOT_TOKEN", config["bot"].get("telegram_token"))
-    # Backward/forward-compatible alias used by some startup paths (main.py expects bot.token).
-    if config["bot"].get("token") is None and config["bot"].get("telegram_token") is not None:
-        config["bot"]["token"] = config["bot"]["telegram_token"]
-    elif config["bot"].get("telegram_token") is None and config["bot"].get("token") is not None:
-        config["bot"]["telegram_token"] = config["bot"]["token"]
     config["bot"]["chat_id"] = os.getenv("TELEGRAM_CHAT_ID", config["bot"].get("chat_id"))
     # Optional admin chat id for one-time startup notifications.
     # If unset, startup notice is skipped (must never crash bot).
     config["bot"]["admin_chat_id"] = os.getenv("ADMIN_CHAT_ID", config["bot"].get("admin_chat_id"))
     config["bot"]["timezone"] = os.getenv("TIMEZONE", config["bot"].get("timezone", "Africa/Lagos"))
+
+    # Backward/forward compatible aliases used across repo iterations.
+    # Some runtime paths expect config['bot']['token'].
+    config["bot"].setdefault("token", config["bot"].get("telegram_token"))
+    if config["bot"].get("telegram_token") and not config["bot"].get("token"):
+        config["bot"]["token"] = config["bot"]["telegram_token"]
 
     config.setdefault("scheduler", {})
     config["scheduler"]["run_interval_hours"] = int(os.getenv("RUN_INTERVAL_HOURS", config["scheduler"].get("run_interval_hours", 24)))
@@ -226,13 +227,13 @@ def load_config() -> Dict[str, Any]:
         "coinmarketcal": os.getenv("COINMARKETCAL_API_KEY"),
     }
 
-    config.setdefault("storage", {})
-    # Backward/forward-compatible alias used by main.py/startup paths.
-    if config["storage"].get("db_path") is None and config["storage"].get("database_path") is not None:
-        config["storage"]["db_path"] = config["storage"]["database_path"]
-    elif config["storage"].get("database_path") is None and config["storage"].get("db_path") is not None:
-        config["storage"]["database_path"] = config["storage"]["db_path"]
-
     config["dry_mode"] = _env_bool("DRY_MODE", False)
     config["offline_test"] = _env_bool("OFFLINE_TEST", False)
+
+    # Storage compatibility: settings.yaml uses storage.database_path, while
+    # some callers (e.g. main.py) expect storage.db_path.
+    config.setdefault("storage", {})
+    if "db_path" not in config["storage"]:
+        dbp = config["storage"].get("database_path") or "./data/web3_intelligence.db"
+        config["storage"]["db_path"] = dbp
     return config
