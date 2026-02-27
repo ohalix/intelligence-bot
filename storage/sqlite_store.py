@@ -121,6 +121,24 @@ class SQLiteStore:
             )
             """
         )
+        # AI response cache — stores pre-computed AI outputs per command per run.
+        # Keyed by command_name; window_id is the ISO timestamp of the ingestion run.
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ai_responses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                command_name TEXT NOT NULL,
+                window_id TEXT NOT NULL,
+                response_text TEXT NOT NULL,
+                provider TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        cur.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ai_responses_cmd_created "
+            "ON ai_responses(command_name, created_at DESC)"
+        )
         self.conn.commit()
 
     def insert_signals(self, signals: List[Dict[str, Any]]) -> int:
@@ -371,3 +389,47 @@ class SQLiteStore:
         except Exception:
             size_bytes = 0
         return {"total_rows": total_rows, "size_bytes": size_bytes}
+
+    # -------------------------
+    # AI response cache
+    # -------------------------
+
+    def save_ai_response(
+        self,
+        command_name: str,
+        response_text: str,
+        window_id: str,
+        provider: Optional[str] = None,
+    ) -> None:
+        """Store an AI-generated response for a command.
+
+        Replaces any previous entry for the same command so the table never
+        grows unbounded. (One canonical cached response per command at a time.)
+        """
+        cur = self.conn.cursor()
+        cur.execute(
+            "DELETE FROM ai_responses WHERE command_name = ?",
+            (command_name,),
+        )
+        cur.execute(
+            """
+            INSERT INTO ai_responses (command_name, window_id, response_text, provider, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (command_name, window_id, response_text, provider, _utcnow_naive().isoformat()),
+        )
+        self.conn.commit()
+
+    def get_ai_response(self, command_name: str) -> Optional[str]:
+        """Retrieve the latest cached AI response for a command, or None."""
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            SELECT response_text FROM ai_responses
+            WHERE command_name = ?
+            ORDER BY created_at DESC LIMIT 1
+            """,
+            (command_name,),
+        )
+        row = cur.fetchone()
+        return str(row["response_text"]) if row else None
