@@ -216,8 +216,14 @@ def load_config() -> Dict[str, Any]:
     )
 
     config["keys"] = {
+        # AI providers — new HF→Gemini pathway
+        "hf_token": os.getenv("HF_TOKEN"),
+        "gemini_api_key": os.getenv("GEMINI_API_KEY"),
+        # Legacy keys — kept in config dict for backward-compat but no longer used
+        # in the main AI pathway. Set them if you still need the old agent shim.
         "openai": os.getenv("OPENAI_API_KEY"),
         "anthropic": os.getenv("ANTHROPIC_API_KEY"),
+        # Ingestion keys
         "twitter_bearer": os.getenv("TWITTER_BEARER_TOKEN"),
         "github_token": os.getenv("GITHUB_TOKEN"),
         # Optional free-keyed APIs (ingestion skips gracefully if missing)
