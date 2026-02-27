@@ -46,10 +46,7 @@ DEFAULT_ECOSYSTEM_API_SOURCES = [
 ]
 
 # Funding
-DEFAULT_FUNDING_RSS_SOURCES = [
-    "https://www.theblock.co/rss.xml",
-    "https://messari.io/rss",
-]
+DEFAULT_FUNDING_RSS_SOURCES = []
 DEFAULT_FUNDING_WEB_SOURCES = [
     "https://www.coindesk.com/tag/venture-capital/",
     # Decrypt funding tag URL is currently 404 in production logs; keep opt-in
