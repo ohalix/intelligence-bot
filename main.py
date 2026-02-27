@@ -136,4 +136,9 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # CancelledError inside main() → asyncio.run() raises KeyboardInterrupt on
+    # clean Ctrl+C in Python 3.13.  This is expected; suppress the traceback.
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
