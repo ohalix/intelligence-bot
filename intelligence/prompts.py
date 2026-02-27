@@ -238,25 +238,28 @@ END WITH
 3-6 bullets of what to monitor next, each tied to an earlier item (with link).
 
 
-TELEGRAM FORMATTING ADDENDUM (MANDATORY - DO NOT IGNORE)
+TELEGRAM PLAIN TEXT FORMATTING ADDENDUM (MANDATORY - DO NOT IGNORE)
 
-Format specifically for Telegram readability.
+OUTPUT MODE: PLAIN TEXT ONLY. This message will be sent with NO parse_mode. Do NOT use any markdown or HTML.
 
-Use bold section headers and consistent spacing.
+FORBIDDEN (will display as literal characters, not formatting):
+- **bold** or __bold__
+- *italic* or _italic_
+- [link text](url) or any markdown link syntax
+- <b>, <i>, <p>, <img> or any HTML tags
+- ```code blocks```
+- # headers
 
-Use 2-6 emojis total across the whole message (not per bullet). Keep them tasteful and not spammy.
-
-Keep bullets short: max ~2 lines per bullet.
-
-Never output HTML tags (<p>, <img>, etc.). Strip them if present.
-
-Links must be clean: always show the URL plainly at the end of the bullet (no markdown link syntax unless explicitly supported).
-
-Avoid walls of text: use short paragraphs and clear breaks between categories.
-
-Do not use code blocks.
-
-If a category is empty, show: "No high-signal items found." (not multiple lines).
+REQUIRED INSTEAD:
+- Use ALL-CAPS for main section headers (e.g., TOP SIGNALS, NEWS, FUNDING, GITHUB).
+- Use a plain bullet: the dash character - or the bullet dot character at the start of each item.
+- Separate sections with a blank line.
+- Use up to 5 emojis total across the entire message (not per bullet). Place them in headers only.
+- URLs must appear as raw links on their own line or at the very end of a bullet, never wrapped in [text](url).
+- Keep each bullet to 1-2 lines maximum.
+- Strip all HTML entities from scraped content (convert &amp; to &, &lt; to <, etc.) before writing.
+- If a category is empty, write one line: "No high-signal items found."
+- Do not use code blocks of any kind.
 """
     return f"{prompt_body}\n--- INPUT DATA (last 24h signals) ---\nDate: {date}\n\n{signals_text}\n"
 
@@ -347,19 +350,21 @@ Watchlist (next 24h)
 3-6 bullets with links.
 
 
-TELEGRAM FORMATTING ADDENDUM (MANDATORY - DO NOT IGNORE)
+TELEGRAM PLAIN TEXT FORMATTING ADDENDUM (MANDATORY - DO NOT IGNORE)
 
-Use bold for "Top Themes", "Key News", "Narrative Implications", "Watchlist".
+OUTPUT MODE: PLAIN TEXT ONLY. No markdown, no HTML.
 
-Use at most 3 emojis total in this response.
+FORBIDDEN: **bold**, *italic*, [text](url) links, <b> <i> <p> <img> tags, code blocks, # headers.
 
-Strip any HTML, entities, or markup from titles/snippets (convert &amp; -> &, etc.).
-
-Keep each bullet compact (<= 2 lines).
-
-Always append the raw URL at the end of each bullet.
-
-If themes overlap, merge them instead of repeating.
+REQUIRED INSTEAD:
+- Section headers in ALL-CAPS (e.g., TOP THEMES, KEY NEWS, NARRATIVE IMPLICATIONS, WATCHLIST).
+- Plain dash - or bullet dot for list items.
+- Blank line between sections.
+- Up to 3 emojis total in the entire message; place in headers only.
+- URLs as raw links at the end of bullets, never as [text](url).
+- Strip HTML entities from titles/snippets before writing (&amp; to &, etc.).
+- Keep each bullet to 2 lines maximum.
+- If themes overlap, merge them instead of repeating.
 """
     return f"{prompt_body}\n--- INPUT DATA (last 24h news signals) ---\nDate: {date}\n\n{signals_text}\n"
 
@@ -461,19 +466,22 @@ For communities: ...
 (each bullet tied to a linked item)
 
 
-TELEGRAM FORMATTING ADDENDUM (MANDATORY - DO NOT IGNORE)
+TELEGRAM PLAIN TEXT FORMATTING ADDENDUM (MANDATORY - DO NOT IGNORE)
 
-Use bold headings for each section.
+OUTPUT MODE: PLAIN TEXT ONLY. No markdown, no HTML.
 
-Max 4 emojis total.
+FORBIDDEN: **bold**, *italic*, [text](url) links, <b> <i> <p> <img> tags, code blocks, # headers.
 
-Each "Actions" bullet must include a link reference to the item that triggered it.
-
-Remove all HTML and decode entities.
-
-Keep classifications clean and consistent (don't invent new categories).
-
-If no strong items exist, output a short "low-signal funding day" summary + 2-3 best links only.
+REQUIRED INSTEAD:
+- Section headers in ALL-CAPS (e.g., HIGHLIGHTS, FUNDING ROUNDS, GRANTS, PARTNERSHIPS, WHAT THIS SIGNALS, ACTIONS).
+- Plain dash - or bullet dot for list items.
+- Blank line between sections.
+- Up to 4 emojis total in the entire message; place in headers only.
+- URLs as raw links at the end of each bullet, never as [text](url).
+- Each Actions bullet must include a raw URL reference to the item that triggered it.
+- Remove all HTML entities from titles/snippets (decode &amp; &lt; &gt; etc.) before writing.
+- Keep classifications consistent (Funding Round / Grant / Partnership / Institutional).
+- If no strong items exist, write a short "Low-signal funding day" paragraph and list 2-3 best raw URLs.
 """
     return f"{prompt_body}\n--- INPUT DATA (last 24h funding & ecosystem signals) ---\nDate: {date}\n\n{signals_text}\n"
 
@@ -565,17 +573,20 @@ Builder Actions
 3-6 bullets with links (e.g., "bookmark this SDK", "watch this repo", "evaluate this exploit repo").
 
 
-TELEGRAM FORMATTING ADDENDUM (MANDATORY - DO NOT IGNORE)
+TELEGRAM PLAIN TEXT FORMATTING ADDENDUM (MANDATORY - DO NOT IGNORE)
 
-Use bold for "Top Repos", "Categories", "Risks", "Builder Actions".
+OUTPUT MODE: PLAIN TEXT ONLY. No markdown, no HTML.
 
-Max 3 emojis total.
+FORBIDDEN: **bold**, *italic*, [text](url) links, <b> <i> <p> <img> tags, code blocks, # headers.
 
-Keep repo bullets readable: [repo] on same line, description on next line if needed.
-
-Confidence markers must be short: (conf: high) etc.
-
-Strip/avoid markdown link syntax; append raw URL.
+REQUIRED INSTEAD:
+- Section headers in ALL-CAPS (e.g., TOP REPOS, CATEGORIES, RISKS, BUILDER ACTIONS).
+- Each repo on its own line starting with a dash -.
+- Confidence on same line as repo: (conf: high) or (conf: med) or (conf: low).
+- URL on the next line or at end of bullet as a raw link — never as [text](url).
+- Up to 3 emojis total in the entire message.
+- Keep bullets readable: repo name + short description + URL — no excessive wrapping.
+- Blank line between sections.
 """
     return f"{prompt_body}\n--- INPUT DATA (last 24h GitHub signals) ---\nDate: {date}\n\n{signals_text}\n"
 
@@ -666,17 +677,20 @@ What to watch next (24-72h)
 3-8 bullets with links
 
 
-TELEGRAM FORMATTING ADDENDUM (MANDATORY - DO NOT IGNORE)
+TELEGRAM PLAIN TEXT FORMATTING ADDENDUM (MANDATORY - DO NOT IGNORE)
 
-Use bold for section headers only (do not bold entire paragraphs).
+OUTPUT MODE: PLAIN TEXT ONLY. No markdown, no HTML.
 
-Max 4 emojis total.
+FORBIDDEN: **bold**, *italic*, [text](url) links, <b> <i> <p> <img> tags, code blocks, # headers.
 
-Keep each project bullet compact and readable.
-
-Due diligence checklist must be a short list (max 6 bullets).
-
-Always include raw URLs; avoid markdown links.
+REQUIRED INSTEAD:
+- Section headers in ALL-CAPS (e.g., TOP NEW PROJECTS, DUE DILIGENCE CHECKLIST, WHAT TO WATCH NEXT).
+- Each project on its own line starting with a dash -.
+- URLs as raw links at the end of each project bullet — never as [text](url).
+- Up to 4 emojis total in the entire message; in section headers only.
+- Keep each project bullet compact: name, what it does, credibility signal, raw URL.
+- Due diligence checklist must be 4-6 short lines max.
+- Use cautious language throughout: "appears to", "signals suggest".
 """
     return f"{prompt_body}\n--- INPUT DATA (last 24h new project signals: Twitter + GitHub) ---\nDate: {date}\n\n{signals_text}\n"
 
@@ -845,20 +859,20 @@ Source Appendix (top references)
 (only include the most important 10-20)
 
 
-TELEGRAM FORMATTING ADDENDUM (MANDATORY - DO NOT IGNORE)
+TELEGRAM PLAIN TEXT FORMATTING ADDENDUM (MANDATORY - DO NOT IGNORE)
 
-Use bold for headers and numbered driver titles only.
+OUTPUT MODE: PLAIN TEXT ONLY. No markdown, no HTML.
 
-Max 5 emojis total across the whole output.
+FORBIDDEN: **bold**, *italic*, [text](url) links, <b> <i> <p> <img> tags, code blocks, # headers.
 
-Keep the "Summary" to one short paragraph (max ~6 lines).
-
-Keep drivers tight; avoid essays.
-
-Links should be appended as raw URLs; do not use markdown link syntax.
-
-The "Source Appendix" must be clean and not exceed 20 links.
-
-Strip HTML and decode entities before writing.
+REQUIRED INSTEAD:
+- Section headers in ALL-CAPS (e.g., MARKET TONE, SUMMARY, PRIMARY DRIVERS, SECTOR HEATMAP, NARRATIVE CLUSTERS, FORWARD VIEW, SOURCE APPENDIX).
+- Numbered drivers as plain text: "1. Driver name" — no markdown bold.
+- URLs as raw links at the end of bullets — never as [text](url).
+- Up to 5 emojis total across the entire message; place in top-level headers only.
+- Keep Summary to one short paragraph (max 6 lines).
+- Keep each driver tight: 2-4 lines max.
+- Source Appendix: plain list of "Title - raw_url", no more than 20 entries.
+- Strip all HTML entities from signal data before writing.
 """
     return f"{prompt_body}\n--- INPUT DATA (last 24h all-category signals) ---\nDate: {date}\n\n{trends_text}\n\n{signals_text}\n"
