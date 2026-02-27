@@ -51,6 +51,15 @@ def start_scheduler(app, config, store: SQLiteStore, scheduler: AsyncIOScheduler
             )
         except Exception:
             logger.exception("Scheduled pipeline run failed")
+            return  # Do not trigger AI gen if ingestion itself failed
+
+        # Trigger AI pre-computation after successful scheduled run.
+        try:
+            from intelligence.ai_cache import run_post_ingest_ai_generation
+            window_id = datetime.now(timezone.utc).isoformat()
+            await run_post_ingest_ai_generation(config, store, window_id)
+        except Exception:
+            logger.exception("Post-ingest AI generation trigger failed (non-fatal)")
 
     hours = int(config.get("scheduler", {}).get("run_interval_hours", 24))
     scheduler.add_job(job, "interval", hours=hours)
@@ -91,6 +100,15 @@ async def _startup_ingest(config, store):
         )
     except Exception:
         logger.exception("Startup ingestion run failed (non-fatal)")
+        return  # Do not trigger AI gen if ingestion itself failed
+
+    # Trigger AI pre-computation after successful startup ingestion.
+    try:
+        from intelligence.ai_cache import run_post_ingest_ai_generation
+        window_id = datetime.now(timezone.utc).isoformat()
+        await run_post_ingest_ai_generation(config, store, window_id)
+    except Exception:
+        logger.exception("Post-ingest AI generation trigger failed (non-fatal)")
 
 
 async def main():
