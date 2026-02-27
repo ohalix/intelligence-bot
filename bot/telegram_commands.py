@@ -1,10 +1,17 @@
+"""Telegram command handlers.
+
+AI overlay added to: /dailybrief /news /trends /funding /github /newprojects
+NOT AI-powered: /rawsignals /sources /run /help
+
+AI routing: HF → Gemini → existing non-AI output (fallback).
+AI layer never crashes the bot; all failures are logged and silently fall back.
+"""
 from __future__ import annotations
 
 import asyncio
 import html
 import logging
 import re
-from importlib import import_module
 from typing import Optional
 
 from telegram import Update
@@ -20,30 +27,31 @@ from .formatter import (
     format_dailybrief_html,
     format_section_html,
 )
+from intelligence.llm_router import route_llm
+from intelligence.prompts import (
+    dailybrief_prompt,
+    trends_prompt,
+    news_prompt,
+    funding_prompt,
+    github_prompt,
+    newprojects_prompt,
+)
 
 log = logging.getLogger(__name__)
 
 # Telegram hard limit is 4096 characters for a message.
-# Use a conservative limit to avoid edge cases with entities.
 SAFE_MSG_LIMIT = 3800
 
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────────────────────
+
 def _strip_html(text: str) -> str:
-    # Very small helper: Telegram HTML supports only a subset; stripping for plain fallback.
     return re.sub(r"<[^>]+>", "", text)
 
 
 def _chunk_text(text: str, limit: int = SAFE_MSG_LIMIT) -> list[str]:
-    """Split text into chunks <= limit.
-
-    Strategy:
-    - Prefer splitting on double newlines (section boundaries)
-    - Then single newlines
-    - Then spaces
-    - Finally hard cut
-
-    This works well for our HTML formatter because tags are closed inside each block.
-    """
     if len(text) <= limit:
         return [text]
 
@@ -55,7 +63,6 @@ def _chunk_text(text: str, limit: int = SAFE_MSG_LIMIT) -> list[str]:
         if len(remaining) <= limit:
             chunks.append(remaining)
             break
-
         cut = -1
         for sep in seps:
             cut = remaining.rfind(sep, 0, limit)
@@ -64,7 +71,6 @@ def _chunk_text(text: str, limit: int = SAFE_MSG_LIMIT) -> list[str]:
                 break
         if cut <= 0:
             cut = limit
-
         chunk = remaining[:cut].rstrip()
         if chunk:
             chunks.append(chunk)
@@ -83,17 +89,12 @@ async def _send_chunks(
     chunks = _chunk_text(text, SAFE_MSG_LIMIT)
     log.info(
         "Telegram chunking: len=%s chunks=%s parse_mode=%s",
-        len(text),
-        len(chunks),
-        parse_mode,
+        len(text), len(chunks), parse_mode,
     )
-
     chat_id = update.effective_chat.id if update.effective_chat else None
     if chat_id is None:
-        # Should never happen in real bot usage.
         return
 
-    # First chunk as a reply (keeps context). Subsequent chunks as normal messages.
     for i, chunk in enumerate(chunks):
         if i == 0 and update.message is not None:
             await update.message.reply_text(
@@ -108,7 +109,6 @@ async def _send_chunks(
                 parse_mode=parse_mode,
                 disable_web_page_preview=disable_web_page_preview,
             )
-        # Tiny delay to be polite and avoid burst issues.
         if len(chunks) > 1:
             await asyncio.sleep(0.05)
 
@@ -120,15 +120,7 @@ async def _safe_reply(
     parse_mode: Optional[str] = None,
     disable_web_page_preview: bool = True,
 ) -> None:
-    """Send a message with guaranteed delivery.
-
-    Order:
-    1) Try send as a single message.
-    2) If "Message is too long" => chunk and send.
-    3) If entity parse fails (HTML/Markdown) => retry once as plain text (chunked if needed).
-
-    This function must never raise and must not crash handlers.
-    """
+    """Send with guaranteed delivery and never-raise guarantee."""
     try:
         if update.message is None:
             return
@@ -140,82 +132,78 @@ async def _safe_reply(
         return
     except BadRequest as e:
         err = str(e)
-        preview = text[:200].replace("\n", " ")
-        log.warning(
-            "Telegram send failed; attempting recovery. err=%s preview=%r", err, preview
-        )
+        log.warning("Telegram send failed; recovering. err=%s", err)
 
-        # Chunking for message-too-long.
         if "Message is too long" in err:
             try:
-                await _send_chunks(
-                    update,
-                    context,
-                    text,
-                    parse_mode=parse_mode,
-                    disable_web_page_preview=disable_web_page_preview,
-                )
+                await _send_chunks(update, context, text,
+                                   parse_mode=parse_mode,
+                                   disable_web_page_preview=disable_web_page_preview)
                 return
             except BadRequest as e2:
-                # If chunking still fails due to parse mode, fall through to plain text.
-                log.warning("Chunked send failed; falling back to plain text. err=%s", e2)
+                log.warning("Chunked send failed; plain text fallback. err=%s", e2)
 
-        # Parse errors or chunking failures: retry plain text, still chunked.
         try:
             plain = _strip_html(text) if (parse_mode == ParseMode.HTML) else text
-            await _send_chunks(
-                update,
-                context,
-                plain,
-                parse_mode=None,
-                disable_web_page_preview=disable_web_page_preview,
-            )
+            await _send_chunks(update, context, plain,
+                               parse_mode=None,
+                               disable_web_page_preview=disable_web_page_preview)
         except Exception as e3:
-            # Absolute last resort: send a minimal error note.
             log.exception("Telegram recovery failed: %s", e3)
             if update.message is not None:
                 await update.message.reply_text(
-                    "Output was too large to deliver completely. Please use /rawsignals with a smaller window.",
+                    "Output was too large to deliver completely. Please use /rawsignals.",
                     parse_mode=None,
                     disable_web_page_preview=True,
                 )
 
 
-async def cmd_dailybrief(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    store: SQLiteStore = context.application.bot_data.get("store")
-    cfg = context.application.bot_data.get("config")
+# ──────────────────────────────────────────────────────────────────────────────
+# AI helper
+# ──────────────────────────────────────────────────────────────────────────────
 
-    payload = build_daily_payload(cfg, store)
+async def _ai_reply(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    prompt: str,
+    cfg: dict,
+    fallback_text: str,
+    fallback_parse_mode: Optional[str],
+) -> None:
+    """Call the LLM router and send result, or fall back to existing output.
 
-    # Prefer HTML for robustness; fallback is handled in _safe_reply.
-    await _safe_reply(
-        update,
-        context,
-        format_dailybrief_html(payload),
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
-    )
+    Never raises. AI failures silently fall through to the existing formatter output.
+    """
+    ai_text: Optional[str] = None
+    try:
+        ai_text = await route_llm(prompt, cfg)
+    except Exception as exc:
+        log.warning("AI layer raised unexpectedly (will use fallback): %s", exc)
 
-# Raw signals: show an ungrouped list (higher limit) without the daily brief wrapper.
-async def cmd_rawsignals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    store: SQLiteStore = context.application.bot_data.get("store")
-    cfg = context.application.bot_data.get("config")
+    if ai_text:
+        log.info("AI response received (len=%s), sending to Telegram", len(ai_text))
+        await _safe_reply(
+            update, context,
+            ai_text,
+            parse_mode=None,          # plain text — LLM output is unpredictable markup
+            disable_web_page_preview=True,
+        )
+    else:
+        log.info("AI unavailable or failed; using existing formatter output")
+        await _safe_reply(
+            update, context,
+            fallback_text,
+            parse_mode=fallback_parse_mode,
+            disable_web_page_preview=True,
+        )
 
-    since = _window_since(cfg)
-    # Larger cap for raw dump, but still safe with chunking.
-    signals = store.get_signals_since(since, source=None, limit=50)
-    await _safe_reply(
-        update,
-        context,
-        format_section_html("Raw Signals", signals),
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
-    )
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Window / limit helpers
+# ──────────────────────────────────────────────────────────────────────────────
 
 def _window_since(cfg) -> "datetime":
     from datetime import datetime, timedelta, timezone
-
     hours = int(cfg.get("storage", {}).get("rolling_window_hours", 24))
     return datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=hours)
 
@@ -224,7 +212,27 @@ def _section_limit(cfg) -> int:
     return int(cfg.get("analysis", {}).get("top_signals_to_analyze", 10))
 
 
-# Section-specific commands.
+# ──────────────────────────────────────────────────────────────────────────────
+# AI-powered command handlers
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def cmd_dailybrief(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    store: SQLiteStore = context.application.bot_data.get("store")
+    cfg = context.application.bot_data.get("config")
+
+    payload = build_daily_payload(cfg, store)
+    fallback = format_dailybrief_html(payload)
+    prompt = dailybrief_prompt(payload)
+
+    await _ai_reply(
+        update, context,
+        prompt=prompt,
+        cfg=cfg,
+        fallback_text=fallback,
+        fallback_parse_mode=ParseMode.HTML,
+    )
+
+
 async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     store: SQLiteStore = context.application.bot_data.get("store")
     cfg = context.application.bot_data.get("config")
@@ -233,12 +241,15 @@ async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     limit = _section_limit(cfg)
     signals = store.get_signals_since(since, "news", limit=limit)
 
-    await _safe_reply(
-        update,
-        context,
-        format_section_html("News", signals),
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
+    fallback = format_section_html("News", signals)
+    prompt = news_prompt(signals)
+
+    await _ai_reply(
+        update, context,
+        prompt=prompt,
+        cfg=cfg,
+        fallback_text=fallback,
+        fallback_parse_mode=ParseMode.HTML,
     )
 
 
@@ -247,9 +258,10 @@ async def cmd_trends(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     cfg = context.application.bot_data.get("config")
 
     payload = build_daily_payload(cfg, store, include_sections=False)
-    trends = (payload.get("inputs", {}) or {}).get("trends", {})
-    rows = (trends or {}).get("trends") or []
+    trends_data = (payload.get("inputs", {}) or {}).get("trends", {})
+    rows = (trends_data or {}).get("trends") or []
 
+    # Build fallback (existing trend display)
     lines: list[str] = [f"<b>Trends — {html.escape(payload.get('date',''))}</b>"]
     if not rows:
         lines.append("<i>No trends in the last 24h.</i>")
@@ -264,13 +276,19 @@ async def cmd_trends(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             except Exception:
                 continue
             lines.append(f"• <b>{chain}</b> · {sector} — count {count} — scoreΣ {score_sum}")
+    fallback = "\n".join(lines).strip()
 
-    await _safe_reply(
-        update,
-        context,
-        "\n".join(lines).strip(),
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
+    # For trends prompt we pass all signals (not just top-N)
+    since = _window_since(cfg)
+    all_signals = store.get_signals_since(since, source=None, limit=50)
+    prompt = trends_prompt(all_signals, trends_data)
+
+    await _ai_reply(
+        update, context,
+        prompt=prompt,
+        cfg=cfg,
+        fallback_text=fallback,
+        fallback_parse_mode=ParseMode.HTML,
     )
 
 
@@ -284,12 +302,15 @@ async def cmd_funding(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     ecosystem = store.get_signals_since(since, "ecosystem", limit=limit)
     combined = (funding + ecosystem)[:limit]
 
-    await _safe_reply(
-        update,
-        context,
-        format_section_html("Funding & Ecosystem", combined),
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
+    fallback = format_section_html("Funding & Ecosystem", combined)
+    prompt = funding_prompt(combined)
+
+    await _ai_reply(
+        update, context,
+        prompt=prompt,
+        cfg=cfg,
+        fallback_text=fallback,
+        fallback_parse_mode=ParseMode.HTML,
     )
 
 
@@ -301,12 +322,15 @@ async def cmd_github(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     limit = _section_limit(cfg)
     signals = store.get_signals_since(since, "github", limit=limit)
 
-    await _safe_reply(
-        update,
-        context,
-        format_section_html("GitHub", signals),
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
+    fallback = format_section_html("GitHub", signals)
+    prompt = github_prompt(signals)
+
+    await _ai_reply(
+        update, context,
+        prompt=prompt,
+        cfg=cfg,
+        fallback_text=fallback,
+        fallback_parse_mode=ParseMode.HTML,
     )
 
 
@@ -320,38 +344,53 @@ async def cmd_newprojects(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     github = store.get_signals_since(since, "github", limit=limit)
     combined = (twitter + github)[:limit]
 
+    fallback = format_section_html("New Projects", combined)
+    prompt = newprojects_prompt(combined)
+
+    await _ai_reply(
+        update, context,
+        prompt=prompt,
+        cfg=cfg,
+        fallback_text=fallback,
+        fallback_parse_mode=ParseMode.HTML,
+    )
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Non-AI command handlers (unchanged)
+# ──────────────────────────────────────────────────────────────────────────────
+
+async def cmd_rawsignals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    store: SQLiteStore = context.application.bot_data.get("store")
+    cfg = context.application.bot_data.get("config")
+
+    since = _window_since(cfg)
+    signals = store.get_signals_since(since, source=None, limit=50)
     await _safe_reply(
-        update,
-        context,
-        format_section_html("New Projects", combined),
+        update, context,
+        format_section_html("Raw Signals", signals),
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
     )
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Help/about command.
-
-    Kept intentionally simple and stable.
-    """
-
     lines = [
         "<b>Web3 Intelligence Bot</b>",
-        "", 
+        "",
         "Commands:",
-        "• /dailybrief — top signals + sections (last 24h)",
-        "• /news — news only", 
-        "• /funding — funding + ecosystem", 
-        "• /github — GitHub activity", 
-        "• /newprojects — twitter + github", 
-        "• /trends — chain × sector clusters", 
-        "• /rawsignals — ungrouped signal dump", 
+        "• /dailybrief — AI-powered daily brief (last 24h)",
+        "• /news — AI news analysis",
+        "• /funding — AI funding & ecosystem analysis",
+        "• /github — AI GitHub activity analysis",
+        "• /newprojects — AI new projects analysis",
+        "• /trends — AI market narrative & trend analysis",
+        "• /rawsignals — ungrouped signal dump (raw)",
         "• /run — trigger ingestion now (rate-limited)",
         "• /sources — show configured ingestion sources",
     ]
     await _safe_reply(
-        update,
-        context,
+        update, context,
         "\n".join(lines),
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
@@ -359,26 +398,14 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def telegram_error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Global PTB error handler.
-
-    Must never raise.
-    """
-
     try:
         log.exception("Unhandled telegram error", exc_info=context.error)
     except Exception:
-        # Absolute last resort: never crash on error handling.
         pass
 
 
 def _manual_run_meta_key_utc() -> str:
-    """Key used to persist manual /run counts in SQLite meta.
-
-    Uses UTC date to be consistent across deployments.
-    """
-
     from datetime import datetime, timezone
-
     return f"manual_run_count:{datetime.now(timezone.utc).replace(tzinfo=None).strftime('%Y-%m-%d')}"
 
 
@@ -395,57 +422,37 @@ def _set_manual_run_count(store: SQLiteStore, count: int) -> None:
 
 
 async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Manual pipeline trigger (rate-limited, persisted).
-
-    - Max 5 per UTC day
-    - Persists across restarts using SQLite meta
-    - Uses an in-process lock to prevent concurrent runs
-    """
-
+    """Manual pipeline trigger (rate-limited, persisted). Non-AI."""
     store: SQLiteStore = context.application.bot_data.get("store")
     cfg = context.application.bot_data.get("config")
 
-    # Concurrency guard
     lock: asyncio.Lock | None = context.application.bot_data.get("pipeline_lock")
     if lock is None:
         lock = asyncio.Lock()
         context.application.bot_data["pipeline_lock"] = lock
 
     if lock.locked():
-        await _safe_reply(
-            update,
-            context,
-            "Pipeline already running, try again shortly.",
-            parse_mode=None,
-            disable_web_page_preview=True,
-        )
+        await _safe_reply(update, context,
+                          "Pipeline already running, try again shortly.",
+                          parse_mode=None, disable_web_page_preview=True)
         return
 
-    # Daily limit
     MAX_PER_DAY = 5
     count = _get_manual_run_count(store)
     remaining = max(0, MAX_PER_DAY - count)
     if remaining <= 0:
-        log.info("Manual /run blocked: limit reached")
-        await _safe_reply(
-            update,
-            context,
-            "Manual runs limit reached (5/day). Try again tomorrow.",
-            parse_mode=None,
-            disable_web_page_preview=True,
-        )
+        await _safe_reply(update, context,
+                          "Manual runs limit reached (5/day). Try again tomorrow.",
+                          parse_mode=None, disable_web_page_preview=True)
         return
 
     from datetime import datetime, timedelta, timezone
-
     since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=24)
-    log.info("Manual /run triggered: since=%s remaining_runs=%s", since.isoformat(), remaining - 1)
+    log.info("Manual /run: since=%s remaining=%s", since.isoformat(), remaining - 1)
 
-    # Reserve a slot before running (prevents double-spend if the process crashes mid-run).
     try:
         _set_manual_run_count(store, count + 1)
     except Exception:
-        # If persistence fails, we still run, but log it.
         log.exception("Failed to persist manual run count")
 
     try:
@@ -454,65 +461,22 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         inserted = result.get("inserted", 0)
         total_seen = result.get("count", 0)
         await _safe_reply(
-            update,
-            context,
+            update, context,
             f"✅ Pipeline run complete (last 24h). inserted={inserted} total_seen={total_seen}. Remaining today: {max(0, MAX_PER_DAY - (count + 1))}",
-            parse_mode=None,
-            disable_web_page_preview=True,
+            parse_mode=None, disable_web_page_preview=True,
         )
     except Exception as e:
         log.exception("Manual /run failed")
-        await _safe_reply(
-            update,
-            context,
-            f"⚠️ Pipeline run failed: {e}",
-            parse_mode=None,
-            disable_web_page_preview=True,
-        )
-
-
-def _read_sources_from_module(mod_path: str, candidates: list[str]) -> tuple[str, list[str]]:
-    """Best-effort extraction of sources from ingestion modules.
-
-    Some deployments import/register cmd_sources from this module.
-    This helper is intentionally defensive and never raises.
-    """
-
-    try:
-        mod = import_module(mod_path)
-    except Exception:
-        return mod_path, []
-
-    for name in candidates:
-        try:
-            val = getattr(mod, name)
-        except Exception:
-            continue
-
-        if isinstance(val, (list, tuple)):
-            return name, [str(x) for x in val]
-        if isinstance(val, dict):
-            out: list[str] = []
-            for k, v in val.items():
-                if isinstance(v, (list, tuple)):
-                    out.append(f"{k}: {', '.join(map(str, v))}")
-                else:
-                    out.append(f"{k}: {v}")
-            return name, out
-
-    return mod_path, []
+        await _safe_reply(update, context,
+                          f"⚠️ Pipeline run failed: {e}",
+                          parse_mode=None, disable_web_page_preview=True)
 
 
 async def cmd_sources(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show currently configured ingestion sources.
-
-    FIX item 4: Reads from runtime config["ingestion"] for accuracy instead of
-    guessing module-level constants (which may not match what's actually used).
-    """
+    """Show currently configured ingestion sources. Non-AI."""
     config = context.bot_data.get("config", {})
     ing = config.get("ingestion", {})
 
-    # Map of (section_label, config_keys, env_var_hints)
     sections = [
         ("News RSS", "news_sources", "NEWS_SOURCES / NEWS_RSS_EXTRA_SOURCES"),
         ("News Web", "news_web_sources", "NEWS_WEB_SOURCES / NEWS_WEB_EXTRA_SOURCES"),
@@ -529,7 +493,6 @@ async def cmd_sources(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         ("Twitter RSS", "twitter_rss_sources", "TWITTER_RSS_SOURCES"),
     ]
 
-    # GitHub queries live under config.github.queries
     github_queries = config.get("github", {}).get("queries", [])
 
     lines: list[str] = ["<b>Current ingestion sources (runtime config)</b>", ""]
@@ -540,12 +503,7 @@ async def cmd_sources(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             val = ing.get(key)
             if val is None:
                 continue
-            if isinstance(val, str):
-                sources = [val]
-            elif isinstance(val, list):
-                sources = [str(s) for s in val]
-            else:
-                sources = [str(val)]
+            sources = [val] if isinstance(val, str) else [str(s) for s in val] if isinstance(val, list) else [str(val)]
 
         lines.append(f"<b>{html.escape(label)}</b> <i>(env: {html.escape(env_hint)})</i>")
         if sources:
@@ -558,8 +516,7 @@ async def cmd_sources(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         lines.append("")
 
     await _safe_reply(
-        update,
-        context,
+        update, context,
         "\n".join(lines).strip(),
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
