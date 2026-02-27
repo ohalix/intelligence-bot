@@ -31,7 +31,7 @@ HF_MODEL = "Qwen/Qwen3-8B:fastest"
 HF_TIMEOUT_SEC = 30
 HF_MAX_TRIES = 2
 
-GEMINI_MODEL = "gemini-2.0-flash-preview-image-generation"  # stable flash preview
+GEMINI_MODEL = "gemini-3-flash-preview"  # stable flash preview
 GEMINI_TIMEOUT_SEC = 25
 GEMINI_MAX_TRIES = 2
 
@@ -132,7 +132,7 @@ def _call_gemini_sync(prompt: str, api_key: str) -> Optional[str]:
         import google.genai as genai  # type: ignore
         client = genai.Client(api_key=api_key)
         response = client.models.generate_content(
-            model="gemini-2.0-flash",
+            model="gemini-3-flash-preview",
             contents=prompt,
         )
         text = getattr(response, "text", None)
