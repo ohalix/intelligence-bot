@@ -169,11 +169,37 @@ async def _ai_reply(
     cfg: dict,
     fallback_text: str,
     fallback_parse_mode: Optional[str],
+    *,
+    cmd_name: str = "",          # command name for cache lookup
 ) -> None:
-    """Call the LLM router and send result, or fall back to existing output.
+    """Serve cached AI response if available; otherwise call LLM router; otherwise fallback.
 
-    Never raises. AI failures silently fall through to the existing formatter output.
+    Priority:
+      1. Cached AI response from ai_responses table (fastest, no quota burn).
+      2. On-demand LLM call via route_llm() (only when no cache exists).
+      3. Existing formatter output (fallback if both above fail).
+
+    Never raises.
     """
+    store: SQLiteStore = context.application.bot_data.get("store")
+
+    # 1. Try cache first
+    if cmd_name and store is not None:
+        try:
+            cached = store.get_ai_response(cmd_name)
+            if cached:
+                log.info("ai_cache: serving cached response for cmd=%s (len=%s)", cmd_name, len(cached))
+                await _safe_reply(
+                    update, context,
+                    cached,
+                    parse_mode=None,
+                    disable_web_page_preview=True,
+                )
+                return
+        except Exception as exc:
+            log.warning("ai_cache: cache lookup failed for cmd=%s: %s; falling through to LLM", cmd_name, exc)
+
+    # 2. On-demand LLM call (cache miss or no cmd_name)
     ai_text: Optional[str] = None
     try:
         ai_text = await route_llm(prompt, cfg)
@@ -181,15 +207,25 @@ async def _ai_reply(
         log.warning("AI layer raised unexpectedly (will use fallback): %s", exc)
 
     if ai_text:
-        log.info("AI response received (len=%s), sending to Telegram", len(ai_text))
+        log.info("AI response received on-demand (len=%s), sending to Telegram", len(ai_text))
+        # Store for future requests
+        if cmd_name and store is not None:
+            try:
+                from datetime import datetime, timezone
+                window_id = datetime.now(timezone.utc).isoformat()
+                store.save_ai_response(cmd_name, ai_text, window_id=window_id, provider="on-demand")
+                log.info("ai_cache: stored on-demand response for cmd=%s", cmd_name)
+            except Exception as exc:
+                log.warning("ai_cache: failed to store on-demand response for cmd=%s: %s", cmd_name, exc)
         await _safe_reply(
             update, context,
             ai_text,
-            parse_mode=None,          # plain text — LLM output is unpredictable markup
+            parse_mode=None,
             disable_web_page_preview=True,
         )
     else:
-        log.info("AI unavailable or failed; using existing formatter output")
+        # 3. Fallback to existing formatter output
+        log.info("AI unavailable; using existing formatter output for cmd=%s", cmd_name)
         await _safe_reply(
             update, context,
             fallback_text,
@@ -230,6 +266,7 @@ async def cmd_dailybrief(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         cfg=cfg,
         fallback_text=fallback,
         fallback_parse_mode=ParseMode.HTML,
+        cmd_name="dailybrief",
     )
 
 
@@ -250,6 +287,7 @@ async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         cfg=cfg,
         fallback_text=fallback,
         fallback_parse_mode=ParseMode.HTML,
+        cmd_name="news",
     )
 
 
@@ -289,6 +327,7 @@ async def cmd_trends(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         cfg=cfg,
         fallback_text=fallback,
         fallback_parse_mode=ParseMode.HTML,
+        cmd_name="trends",
     )
 
 
@@ -311,6 +350,7 @@ async def cmd_funding(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         cfg=cfg,
         fallback_text=fallback,
         fallback_parse_mode=ParseMode.HTML,
+        cmd_name="funding",
     )
 
 
@@ -331,6 +371,7 @@ async def cmd_github(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         cfg=cfg,
         fallback_text=fallback,
         fallback_parse_mode=ParseMode.HTML,
+        cmd_name="github",
     )
 
 
@@ -353,6 +394,7 @@ async def cmd_newprojects(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         cfg=cfg,
         fallback_text=fallback,
         fallback_parse_mode=ParseMode.HTML,
+        cmd_name="newprojects",
     )
 
 
@@ -465,6 +507,11 @@ async def cmd_run(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"✅ Pipeline run complete (last 24h). inserted={inserted} total_seen={total_seen}. Remaining today: {max(0, MAX_PER_DAY - (count + 1))}",
             parse_mode=None, disable_web_page_preview=True,
         )
+        # Trigger AI pre-computation after successful manual run.
+        from intelligence.ai_cache import run_post_ingest_ai_generation
+        from datetime import datetime, timezone as _tz
+        window_id = datetime.now(_tz.utc).isoformat()
+        await run_post_ingest_ai_generation(cfg, store, window_id)
     except Exception as e:
         log.exception("Manual /run failed")
         await _safe_reply(update, context,
