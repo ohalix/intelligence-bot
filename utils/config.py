@@ -62,10 +62,11 @@ DEFAULT_FUNDING_API_SOURCES = [
 # GitHub input defaults
 DEFAULT_GITHUB_QUERIES = [
     # High-signal OSS activity queries. Users can override via env.
-    "topic:ethereum language:solidity pushed:>2025-01-01",
-    "topic:layer-2 language:solidity pushed:>2025-01-01",
-    "topic:defi language:solidity pushed:>2025-01-01",
-    "topic:zk language:rust pushed:>2025-01-01",
+    # NOTE: do NOT include pushed:>date here — the ingester appends it dynamically.
+    "topic:ethereum stars:>5",
+    "topic:defi stars:>5",
+    "topic:layer2 stars:>5",
+    "topic:zk-proofs stars:>5",
 ]
 
 def _env_bool(name: str, default: bool=False) -> bool:
