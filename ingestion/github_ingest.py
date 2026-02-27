@@ -1,14 +1,14 @@
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
 
 
 DEFAULT_QUERIES = [
-    "language:Solidity stars:>50 pushed:>2024-01-01",
-    "topic:defi stars:>50 pushed:>2024-01-01",
+    "language:Solidity stars:>10",
+    "topic:defi stars:>10",
 ]
 
 
