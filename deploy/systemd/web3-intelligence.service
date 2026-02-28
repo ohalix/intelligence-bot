@@ -4,12 +4,12 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/web3-intelligence
-EnvironmentFile=/opt/web3-intelligence/.env
-ExecStart=/opt/web3-intelligence/venv/bin/python main.py
+User=olamide3121
+WorkingDirectory=/home/olamide3121/web3-intelligence
+EnvironmentFile=/home/olamide3121/web3-intelligence/.env
+ExecStart=/home/olamide3121/web3-intelligence/venv/bin/python main.py
 Restart=always
 RestartSec=5
-User=ubuntu
 
 [Install]
 WantedBy=multi-user.target
