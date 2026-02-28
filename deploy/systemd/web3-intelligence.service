@@ -5,9 +5,9 @@ After=network.target
 [Service]
 Type=simple
 User=olamide3121
-WorkingDirectory=/home/olamide3121/web3-intelligence
-EnvironmentFile=/home/olamide3121/web3-intelligence/.env
-ExecStart=/home/olamide3121/web3-intelligence/venv/bin/python main.py
+WorkingDirectory=/home/olamide3121/intelligence-bot 
+EnvironmentFile=/home/olamide3121/intelligence-bot/.env
+ExecStart=/home/olamide3121/intelligence-bot/.venv/bin/python main.py
 Restart=always
 RestartSec=5
 
