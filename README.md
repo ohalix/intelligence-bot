@@ -19,11 +19,14 @@ python main.py                     # run Telegram bot (long polling)
 
 ## Commands
 
-- /dailybrief /news /newprojects /trends /funding /github /rawsignals
+- /dailybrief
+- /news
+- /newprojects
+- /trends
+- /funding
+- /github
+- /rawsignals
 
-## Env Vars
-
-See `.env.example` (matches spec).
 
 ## Deployment (GCP Compute Engine VM - recommended)
 
