@@ -86,6 +86,9 @@ async def _send_chunks(
     parse_mode: Optional[str],
     disable_web_page_preview: bool,
 ) -> None:
+    # Step 3: Per-chunk error handling with best-effort delivery.
+    # Inter-chunk delay raised from 50ms → 500ms to respect Telegram's
+    # ~1 message/second per-chat rate limit.
     chunks = _chunk_text(text, SAFE_MSG_LIMIT)
     log.info(
         "Telegram chunking: len=%s chunks=%s parse_mode=%s",
@@ -95,22 +98,48 @@ async def _send_chunks(
     if chat_id is None:
         return
 
+    failed_chunks: list[int] = []
+
     for i, chunk in enumerate(chunks):
-        if i == 0 and update.message is not None:
-            await update.message.reply_text(
-                chunk,
-                parse_mode=parse_mode,
-                disable_web_page_preview=disable_web_page_preview,
+        try:
+            if i == 0 and update.message is not None:
+                await update.message.reply_text(
+                    chunk,
+                    parse_mode=parse_mode,
+                    disable_web_page_preview=disable_web_page_preview,
+                )
+            else:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=chunk,
+                    parse_mode=parse_mode,
+                    disable_web_page_preview=disable_web_page_preview,
+                )
+        except Exception as chunk_exc:
+            log.warning(
+                "Chunk %s/%s failed to send: %s — continuing best-effort delivery",
+                i + 1, len(chunks), chunk_exc,
             )
-        else:
+            failed_chunks.append(i + 1)
+
+        if len(chunks) > 1:
+            await asyncio.sleep(0.5)  # 500ms between chunks
+
+    # If any chunks failed, notify the user so they know output is partial.
+    if failed_chunks and chat_id is not None:
+        try:
             await context.bot.send_message(
                 chat_id=chat_id,
-                text=chunk,
-                parse_mode=parse_mode,
-                disable_web_page_preview=disable_web_page_preview,
+                text=(
+                    f"⚠️ Part of the output failed to send "
+                    f"(chunk(s) {failed_chunks} of {len(chunks)}) — "
+                    "please use /rawsignals for full data."
+                ),
+                parse_mode=None,
+                disable_web_page_preview=True,
             )
-        if len(chunks) > 1:
-            await asyncio.sleep(0.05)
+        except Exception:
+            pass
 
 
 async def _safe_reply(
@@ -120,10 +149,47 @@ async def _safe_reply(
     parse_mode: Optional[str] = None,
     disable_web_page_preview: bool = True,
 ) -> None:
-    """Send with guaranteed delivery and never-raise guarantee."""
-    try:
-        if update.message is None:
+    """Send with guaranteed delivery and never-raise guarantee.
+
+    Step 2: Proactively chunks when len(text) > SAFE_MSG_LIMIT, eliminating
+    reliance on Telegram's BadRequest exception to trigger chunking.
+    """
+    if update.message is None:
+        return
+
+    # Step 2: Proactive pre-check — chunk before attempting any Telegram send.
+    if len(text) > SAFE_MSG_LIMIT:
+        log.info(
+            "Proactive chunking triggered: len=%s > SAFE_MSG_LIMIT=%s",
+            len(text), SAFE_MSG_LIMIT,
+        )
+        try:
+            await _send_chunks(update, context, text,
+                               parse_mode=parse_mode,
+                               disable_web_page_preview=disable_web_page_preview)
             return
+        except Exception as e_chunk:
+            log.warning("Proactive chunked send failed; attempting plain text: %s", e_chunk)
+            try:
+                plain = _strip_html(text) if (parse_mode == ParseMode.HTML) else text
+                await _send_chunks(update, context, plain,
+                                   parse_mode=None,
+                                   disable_web_page_preview=disable_web_page_preview)
+                return
+            except Exception as e_plain:
+                log.exception("Plain text chunked send also failed: %s", e_plain)
+                try:
+                    await update.message.reply_text(
+                        "Output was too large to deliver completely. Please use /rawsignals.",
+                        parse_mode=None,
+                        disable_web_page_preview=True,
+                    )
+                except Exception:
+                    pass
+                return
+
+    # Text fits in a single message — attempt direct send.
+    try:
         await update.message.reply_text(
             text,
             parse_mode=parse_mode,
@@ -188,7 +254,15 @@ async def _ai_reply(
         try:
             cached = store.get_ai_response(cmd_name)
             if cached:
-                log.info("ai_cache: serving cached response for cmd=%s (len=%s)", cmd_name, len(cached))
+                # Step 5: Log cmd name + length for the cache-hit path.
+                log.info(
+                    "ai_cache: serving cached response for cmd=%s (len=%s)",
+                    cmd_name, len(cached),
+                )
+                log.info(
+                    "AI response for cmd=%s len=%s (source=cache)",
+                    cmd_name, len(cached),
+                )
                 await _safe_reply(
                     update, context,
                     cached,
@@ -197,7 +271,10 @@ async def _ai_reply(
                 )
                 return
         except Exception as exc:
-            log.warning("ai_cache: cache lookup failed for cmd=%s: %s; falling through to LLM", cmd_name, exc)
+            log.warning(
+                "ai_cache: cache lookup failed for cmd=%s: %s; falling through to LLM",
+                cmd_name, exc,
+            )
 
     # 2. On-demand LLM call (cache miss or no cmd_name)
     ai_text: Optional[str] = None
@@ -207,7 +284,13 @@ async def _ai_reply(
         log.warning("AI layer raised unexpectedly (will use fallback): %s", exc)
 
     if ai_text:
-        log.info("AI response received on-demand (len=%s), sending to Telegram", len(ai_text))
+        # Step 5: Log cmd name + length for the on-demand (cache-miss) path.
+        log.info(
+            "AI response received on-demand (len=%s), sending to Telegram", len(ai_text)
+        )
+        log.info(
+            "AI response for cmd=%s len=%s (source=on-demand)", cmd_name, len(ai_text)
+        )
         # Store for future requests
         if cmd_name and store is not None:
             try:
@@ -216,7 +299,10 @@ async def _ai_reply(
                 store.save_ai_response(cmd_name, ai_text, window_id=window_id, provider="on-demand")
                 log.info("ai_cache: stored on-demand response for cmd=%s", cmd_name)
             except Exception as exc:
-                log.warning("ai_cache: failed to store on-demand response for cmd=%s: %s", cmd_name, exc)
+                log.warning(
+                    "ai_cache: failed to store on-demand response for cmd=%s: %s",
+                    cmd_name, exc,
+                )
         await _safe_reply(
             update, context,
             ai_text,
@@ -534,7 +620,6 @@ async def cmd_sources(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         ("Ecosystem RSS", "ecosystem_rss_sources", "ECOSYSTEM_RSS_SOURCES / ECOSYSTEM_RSS_EXTRA_SOURCES"),
         ("Ecosystem Web", "ecosystem_web_sources", "ECOSYSTEM_WEB_SOURCES / ECOSYSTEM_WEB_EXTRA_SOURCES"),
         ("Ecosystem API", "ecosystem_api_sources", "ECOSYSTEM_API_SOURCES / ECOSYSTEM_API_EXTRA_SOURCES"),
-        ("Snapshot Spaces", "snapshot_spaces", "ECOSYSTEM_SNAPSHOT_SPACES"),
         ("GitHub Queries", "github_queries", "GITHUB_QUERIES / GITHUB_EXTRA_QUERIES"),
         ("Twitter Mode", "twitter_mode", "TWITTER_MODE"),
         ("Twitter RSS", "twitter_rss_sources", "TWITTER_RSS_SOURCES"),
