@@ -37,8 +37,8 @@ GEMINI_MAX_TRIES = 2
 
 # Step 1: Raised from 1200 → 3000 to prevent mid-sentence/mid-URL truncation.
 # At ~4 chars/token, 1200 yielded ~4800 chars which could cut before model finished.
-# 3000 is a safe ceiling for all commands including the richest (dailybrief).
-MAX_TOKENS = 3000
+# 8000 is a safe ceiling for all commands including the richest (dailybrief).
+MAX_TOKENS = 8000
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -81,6 +81,10 @@ async def _call_hf(prompt: str, hf_token: str) -> Optional[str]:
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": MAX_TOKENS,
         "temperature": 0.4,
+        "TopP": 0.95,
+        "TopK": 20,
+        "MinP": 0,
+        "enable_thinking": True,
     }
     timeout = aiohttp.ClientTimeout(total=HF_TIMEOUT_SEC)
 
@@ -159,7 +163,7 @@ def _call_gemini_sync(prompt: str, api_key: str) -> Optional[str]:
         gen_config = None
         try:
             from google.genai import types as genai_types  # type: ignore
-            gen_config = genai_types.GenerateContentConfig(max_output_tokens=3000)
+            gen_config = genai_types.GenerateContentConfig(max_output_tokens=15000)
         except Exception:
             pass  # graceful fallback if SDK shape differs
 
