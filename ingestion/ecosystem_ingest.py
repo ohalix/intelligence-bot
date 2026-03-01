@@ -1,3 +1,13 @@
+"""Ecosystem ingestion: RSS + Web + API.
+
+Step 7: Replaced fetch_text() with fetch_rss_conditional() for RSS sources,
+matching the news ingester pattern. Adds User-Agent, ETag/304 support, and
+proper 429 handling.
+
+Directive B: governance_from_snapshot removed. The snapshot_proposals API
+source path has been removed entirely — it was buggy (silent TypeError) and
+redundant. References to snapshot_spaces config key also removed.
+"""
 import asyncio
 import logging
 from datetime import datetime
@@ -5,10 +15,8 @@ from typing import Any, Dict, List
 
 import feedparser
 
-from utils.http import fetch_text
+from utils.http import fetch_rss_conditional, parse_rss_entry_datetime
 from utils.web_scraper import scrape_page_links
-
-from ingestion.api_sources import governance_from_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -51,13 +59,14 @@ class EcosystemIngester:
     def __init__(self, config: Dict[str, Any], session):
         self.config = config
         self.session = session
+        self._store = None  # set by pipeline for conditional RSS caching
 
     async def ingest(self, since: datetime) -> List[Dict[str, Any]]:
         ing = self.config.get("ingestion", {})
         rss_sources = ing.get("ecosystem_rss_sources", DEFAULT_ECOSYSTEM_FEEDS)
         web_sources = ing.get("ecosystem_web_sources", DEFAULT_ECOSYSTEM_WEB_PAGES)
         api_sources = ing.get("ecosystem_api_sources", [])
-        snapshot_spaces = ing.get("snapshot_spaces", [])
+        # snapshot_spaces removed — governance_from_snapshot is no longer used.
 
         concurrency = int(self.config.get("ingestion", {}).get("ecosystem_concurrency", 5))
         sem = asyncio.Semaphore(concurrency)
@@ -66,6 +75,7 @@ class EcosystemIngester:
             "rss_attempted": 0,
             "rss_success": 0,
             "rss_fail": 0,
+            "rss_skipped_304": 0,
             "web_attempted": 0,
             "web_success": 0,
             "web_fail": 0,
@@ -80,17 +90,31 @@ class EcosystemIngester:
             async with sem:
                 stats["rss_attempted"] += 1
                 try:
-                    content = await fetch_text(self.session, url)
+                    # Step 7: Use fetch_rss_conditional (adds User-Agent, ETag/304, 429 handling)
+                    store = getattr(self, "_store", None)
+                    content, not_modified = await fetch_rss_conditional(
+                        self.session, url, store=store
+                    )
+                    if not_modified:
+                        stats["rss_skipped_304"] += 1
+                        logger.debug("EcosystemIngester RSS 304 Not Modified: %s", url)
+                        return []
                     parsed = feedparser.parse(content)
-                    # FIX item 16: bozo detection
                     if getattr(parsed, "bozo", False):
                         exc = getattr(parsed, "bozo_exception", None)
-                        logger.debug("EcosystemIngester RSS bozo=True for %s: %s", url, type(exc).__name__ if exc else "unknown")
+                        exc_type = type(exc).__name__ if exc else "unknown"
+                        if "html" in (content or "")[:200].lower():
+                            logger.warning(
+                                "EcosystemIngester RSS bozo=True for %s (likely HTML error page): %s",
+                                url, exc_type,
+                            )
+                        else:
+                            logger.debug(
+                                "EcosystemIngester RSS bozo=True for %s: %s", url, exc_type
+                            )
                     out: List[Dict[str, Any]] = []
                     for entry in parsed.entries:
-                        # FIX item 5: timezone-aware date parsing
-                        from utils.http import parse_rss_entry_datetime as _parse_dt
-                        dt_entry = _parse_dt(entry)
+                        dt_entry = parse_rss_entry_datetime(entry)
                         if dt_entry is not None and dt_entry < since:
                             continue
                         out.append(
@@ -137,7 +161,6 @@ class EcosystemIngester:
                     stats["web_fail"] += 1
                     key = type(e).__name__
                     stats["errors"][key] = stats["errors"].get(key, 0) + 1
-                    # Explicitly call out common blocking patterns
                     msg = str(e)
                     if "403" in msg or "Just a moment" in msg:
                         logger.warning("EcosystemIngester WEB blocked for %s: %s", url, e)
@@ -150,10 +173,14 @@ class EcosystemIngester:
                 stats["api_attempted"] += 1
                 try:
                     api = (name or "").strip().lower()
+                    # Directive B: snapshot_proposals removed entirely.
                     if api == "snapshot_proposals":
-                        out = await governance_from_snapshot(self.session, since, list(snapshot_spaces))
+                        logger.warning(
+                            "snapshot_proposals has been removed as an API source. "
+                            "Remove it from ECOSYSTEM_API_SOURCES to suppress this warning."
+                        )
+                        out = []
                     elif api == "defillama_chain_tvl":
-                        # FIX item 22: was a no-op returning []; now explicitly warns operator
                         logger.warning(
                             "defillama_chain_tvl is not implemented (no schema defined). "
                             "Remove it from ECOSYSTEM_API_SOURCES to suppress this warning. Skipping."
@@ -180,16 +207,19 @@ class EcosystemIngester:
         flattened = [x for sub in results for x in sub]
 
         logger.info(
-            "EcosystemIngester run: rss_attempted=%s rss_success=%s rss_fail=%s web_attempted=%s web_success=%s web_fail=%s api_attempted=%s api_success=%s api_fail=%s items=%s top_errors=%s",
+            "EcosystemIngester run: rss_attempted=%s rss_success=%s rss_fail=%s rss_304=%s "
+            "web_attempted=%s web_success=%s web_fail=%s "
+            "api_attempted=%s api_success=%s api_fail=%s items=%s top_errors=%s",
             stats["rss_attempted"],
             stats["rss_success"],
             stats["rss_fail"],
+            stats["rss_skipped_304"],
             stats["web_attempted"],
             stats["web_success"],
             stats["web_fail"],
-            stats.get("api_attempted", 0),
-            stats.get("api_success", 0),
-            stats.get("api_fail", 0),
+            stats["api_attempted"],
+            stats["api_success"],
+            stats["api_fail"],
             stats["items"],
             dict(sorted(stats["errors"].items(), key=lambda kv: kv[1], reverse=True)[:3]),
         )

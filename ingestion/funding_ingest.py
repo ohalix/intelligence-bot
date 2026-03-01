@@ -1,3 +1,12 @@
+"""Funding ingestion: RSS + Web + API.
+
+Step 7: Replaced fetch_text() with fetch_rss_conditional() for RSS sources,
+matching the news ingester pattern. Adds User-Agent, ETag/304 support, and
+proper 429 handling.
+
+Directive A: CoinMarketCal code paths removed entirely. Source was a dead end
+(disabled at runtime) and was cluttering the ingestion log.
+"""
 import asyncio
 import logging
 from datetime import datetime
@@ -6,7 +15,7 @@ from typing import Any, Dict, List
 import feedparser
 
 from ingestion.api_sources import funding_from_defillama_raises
-from utils.http import fetch_text, fetch_rss_conditional, parse_rss_entry_datetime
+from utils.http import fetch_rss_conditional, parse_rss_entry_datetime
 from utils.web_scraper import scrape_page_links
 
 logger = logging.getLogger(__name__)
@@ -26,6 +35,7 @@ class FundingIngester:
     def __init__(self, config: Dict[str, Any], session):
         self.config = config
         self.session = session
+        self._store = None  # set by pipeline for conditional RSS caching
 
     async def ingest(self, since: datetime) -> List[Dict[str, Any]]:
         ing = self.config.get("ingestion", {})
@@ -37,7 +47,7 @@ class FundingIngester:
         sem = asyncio.Semaphore(concurrency)
 
         stats = {
-            "rss": {"attempted": 0, "success": 0, "fail": 0, "items": 0},
+            "rss": {"attempted": 0, "success": 0, "fail": 0, "items": 0, "skipped_304": 0},
             "web": {"attempted": 0, "success": 0, "fail": 0, "items": 0},
             "api": {"attempted": 0, "success": 0, "fail": 0, "items": 0},
             "errors": {},
@@ -47,12 +57,27 @@ class FundingIngester:
             async with sem:
                 stats["rss"]["attempted"] += 1
                 try:
-                    content = await fetch_text(self.session, url)
+                    # Step 7: Use fetch_rss_conditional (adds User-Agent, ETag/304, 429 handling)
+                    store = getattr(self, "_store", None)
+                    content, not_modified = await fetch_rss_conditional(
+                        self.session, url, store=store
+                    )
+                    if not_modified:
+                        stats["rss"]["skipped_304"] += 1
+                        logger.debug("Funding RSS 304 Not Modified: %s", url)
+                        return []
                     parsed = feedparser.parse(content)
-                    # FIX item 16: bozo detection
+                    # bozo detection
                     if getattr(parsed, "bozo", False):
                         exc = getattr(parsed, "bozo_exception", None)
-                        logger.debug("Funding RSS bozo=True for %s: %s", url, type(exc).__name__ if exc else "unknown")
+                        exc_type = type(exc).__name__ if exc else "unknown"
+                        if "html" in (content or "")[:200].lower():
+                            logger.warning(
+                                "Funding RSS bozo=True for %s (likely HTML error page): %s",
+                                url, exc_type,
+                            )
+                        else:
+                            logger.debug("Funding RSS bozo=True for %s: %s", url, exc_type)
                     out: List[Dict[str, Any]] = []
                     for entry in parsed.entries:
                         dt_entry = parse_rss_entry_datetime(entry)
@@ -116,15 +141,8 @@ class FundingIngester:
                     api = (name or "").strip().lower()
                     if api == "defillama_raises":
                         out = await funding_from_defillama_raises(self.session, since)
-                    elif api == "coinmarketcal_events":
-                        key = (self.config.get("keys", {}) or {}).get("coinmarketcal")
-                        if not key:
-                            logger.info("CoinMarketCal API disabled (missing COINMARKETCAL_API_KEY)")
-                            out = []
-                        else:
-                            # Endpoint details vary by plan; keep disabled until configured.
-                            logger.info("CoinMarketCal API configured, but endpoint not enabled by default")
-                            out = []
+                    # Directive A: coinmarketcal_events removed entirely.
+                    # It was always disabled at runtime (returned []) and bugged runtime logs.
                     else:
                         logger.warning("Unknown funding API source: %s", name)
                         out = []
@@ -149,11 +167,12 @@ class FundingIngester:
         flattened = [x for sub in results for x in sub]
 
         logger.info(
-            "FundingIngester run: rss(a=%s s=%s f=%s i=%s) web(a=%s s=%s f=%s i=%s) api(a=%s s=%s f=%s i=%s) top_errors=%s",
+            "FundingIngester run: rss(a=%s s=%s f=%s i=%s 304=%s) web(a=%s s=%s f=%s i=%s) api(a=%s s=%s f=%s i=%s) top_errors=%s",
             stats["rss"]["attempted"],
             stats["rss"]["success"],
             stats["rss"]["fail"],
             stats["rss"]["items"],
+            stats["rss"]["skipped_304"],
             stats["web"]["attempted"],
             stats["web"]["success"],
             stats["web"]["fail"],

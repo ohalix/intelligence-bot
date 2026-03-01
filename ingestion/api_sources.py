@@ -4,9 +4,12 @@ from typing import Any, Dict, List, Optional
 
 import aiohttp
 
-from utils.http import fetch_json, fetch_json_post
+from utils.http import fetch_json
 
 logger = logging.getLogger(__name__)
+
+# NOTE: fetch_json_post import removed — it was only used by governance_from_snapshot
+# which has been removed per Directive B (redundant and buggy).
 
 
 def _iso_or_none(v: Any) -> Optional[str]:
@@ -17,7 +20,9 @@ def _iso_or_none(v: Any) -> Optional[str]:
         return s or None
     try:
         if isinstance(v, (int, float)):
-            return datetime.fromtimestamp(float(v, tz=timezone.utc).replace(tzinfo=None)).isoformat() + "Z"
+            # Step 6 Bug Fix: was float(v, tz=timezone.utc) which raises TypeError.
+            # Corrected to: datetime.fromtimestamp(float(v), tz=...).replace(tzinfo=None)
+            return datetime.fromtimestamp(float(v), tz=timezone.utc).replace(tzinfo=None).isoformat() + "Z"
     except Exception:
         return None
     return None
@@ -55,7 +60,11 @@ async def news_from_cryptocurrency_cv(session: aiohttp.ClientSession, since: dat
         if not isinstance(it, dict):
             continue
         # Observed fields: title, url, source, created_at/updated_at (varies)
-        published_at = _iso_or_none(it.get("published_at")) or _iso_or_none(it.get("created_at")) or _iso_or_none(it.get("updated_at"))
+        published_at = (
+            _iso_or_none(it.get("published_at"))
+            or _iso_or_none(it.get("created_at"))
+            or _iso_or_none(it.get("updated_at"))
+        )
         if not published_at:
             continue
         try:
@@ -77,7 +86,11 @@ async def news_from_cryptocurrency_cv(session: aiohttp.ClientSession, since: dat
     return items
 
 
-async def news_from_coinmarketcap_posts_latest(session: aiohttp.ClientSession, since: datetime, api_key: Optional[str]) -> List[Dict[str, Any]]:
+async def news_from_coinmarketcap_posts_latest(
+    session: aiohttp.ClientSession,
+    since: datetime,
+    api_key: Optional[str],
+) -> List[Dict[str, Any]]:
     """CoinMarketCap latest posts API (requires free API key).
 
     Endpoint: https://pro-api.coinmarketcap.com/v1/content/posts/latest
@@ -182,60 +195,6 @@ async def funding_from_defillama_raises(session: aiohttp.ClientSession, since: d
         )
     return items
 
-
-async def governance_from_snapshot(session: aiohttp.ClientSession, since: datetime, spaces: List[str]) -> List[Dict[str, Any]]:
-    """Snapshot Hub GraphQL proposals for a set of spaces."""
-    if not spaces:
-        return []
-    endpoint = "https://hub.snapshot.org/graphql"
-    query = """
-    query Proposals($spaces: [String!], $created_gte: Int!) {
-      proposals(first: 50, where: { space_in: $spaces, created_gte: $created_gte }, orderBy: "created", orderDirection: desc) {
-        id
-        title
-        body
-        created
-        link
-        space { id }
-      }
-    }
-    """
-    # FIX item 20: ensure UTC-aware timestamp conversion to avoid naive datetime issues
-    if since.tzinfo is None:
-        since_aware = since.replace(tzinfo=timezone.utc)
-    else:
-        since_aware = since
-    created_gte = int(since_aware.timestamp())
-    payload = {"query": query, "variables": {"spaces": spaces, "created_gte": created_gte}}
-    try:
-        data = await fetch_json_post(session, endpoint, json_payload=payload)
-    except Exception as e:
-        logger.warning("Snapshot GraphQL fetch failed: %s", e)
-        return []
-
-    proposals = (((data or {}).get("data") or {}).get("proposals")) or []
-    out: List[Dict[str, Any]] = []
-    for p in proposals:
-        created = p.get("created")
-        published_at = _iso_or_none(created)
-        if not published_at:
-            continue
-        # created is epoch
-        try:
-            dt = datetime.fromtimestamp(int(created, tz=timezone.utc).replace(tzinfo=None))
-        except Exception:
-            continue
-        if dt < since:
-            continue
-        space_id = ((p.get("space") or {}).get("id")) or "snapshot"
-        out.append(
-            {
-                "source": "ecosystem",
-                "source_id": "snapshot_proposals",
-                "title": f"Governance ({space_id}): {(p.get('title') or '').strip()}",
-                "url": (p.get("link") or "").strip(),
-                "description": (p.get("body") or "").strip()[:8000],
-                "published_at": dt.isoformat() + "Z",
-            }
-        )
-    return out
+# governance_from_snapshot removed per Directive B.
+# It was producing zero results due to an int() tz kwarg TypeError (swallowed by
+# try/except) and the source has been removed from all ingestion defaults.
