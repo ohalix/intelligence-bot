@@ -5,8 +5,8 @@ sys.path.insert(0, str(ROOT))
 import asyncio
 from datetime import datetime, timedelta
 
+import logging
 from utils.config import load_config
-from utils.logging import setup_logging
 from storage.sqlite_store import SQLiteStore
 from engine.pipeline import run_pipeline, build_daily_payload
 from processing.deduplicator import Deduplicator
@@ -34,7 +34,7 @@ def seed_demo_signals(cfg, store):
 
 async def run():
     cfg = load_config()
-    setup_logging(cfg)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     store = SQLiteStore(cfg.get("storage", {}).get("db_path") or cfg.get("storage", {}).get("database_path", "./data/web3_intelligence.db"))
     since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=24)
     _ = await run_pipeline(cfg, store, since=since, manual=True)
