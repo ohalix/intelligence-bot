@@ -35,7 +35,10 @@ GEMINI_MODEL = "gemini-3-flash-preview"  # stable flash preview
 GEMINI_TIMEOUT_SEC = 25
 GEMINI_MAX_TRIES = 2
 
-MAX_TOKENS = 1200  # cap to keep responses Telegram-friendly
+# Step 1: Raised from 1200 → 3000 to prevent mid-sentence/mid-URL truncation.
+# At ~4 chars/token, 1200 yielded ~4800 chars which could cut before model finished.
+# 3000 is a safe ceiling for all commands including the richest (dailybrief).
+MAX_TOKENS = 3000
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -107,13 +110,32 @@ async def _call_hf(prompt: str, hf_token: str) -> Optional[str]:
                     text = _extract_hf_text(data)
                     if text:
                         logger.info("HF success on attempt %s (len=%s)", attempt, len(text))
+                        # Step 4: Extract and log finish_reason for truncation observability.
+                        try:
+                            finish_reason = data["choices"][0].get("finish_reason")
+                            if finish_reason == "length":
+                                logger.warning(
+                                    "HF response truncated at token limit "
+                                    "(finish_reason=length) — consider raising MAX_TOKENS. "
+                                    "Current MAX_TOKENS=%s",
+                                    MAX_TOKENS,
+                                )
+                            else:
+                                logger.info(
+                                    "HF response finish_reason=%s", finish_reason
+                                )
+                        except (KeyError, IndexError, TypeError):
+                            pass
                         return text
                     logger.warning(
                         "HF attempt %s/%s: response shape unexpected: %s",
                         attempt, HF_MAX_TRIES, str(data)[:120],
                     )
         except asyncio.TimeoutError:
-            logger.warning("HF attempt %s/%s: timeout after %ss", attempt, HF_MAX_TRIES, HF_TIMEOUT_SEC)
+            logger.warning(
+                "HF attempt %s/%s: timeout after %ss",
+                attempt, HF_MAX_TRIES, HF_TIMEOUT_SEC,
+            )
         except aiohttp.ClientError as exc:
             logger.warning("HF attempt %s/%s: client error: %s", attempt, HF_MAX_TRIES, exc)
         except Exception as exc:
@@ -131,10 +153,24 @@ def _call_gemini_sync(prompt: str, api_key: str) -> Optional[str]:
     try:
         import google.genai as genai  # type: ignore
         client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(
-            model="gemini-3-flash-preview",
-            contents=prompt,
-        )
+
+        # Step 1: Add GenerationConfig with max_output_tokens=3000 for parity
+        # with HF cap and to prevent unbounded Gemini output.
+        gen_config = None
+        try:
+            from google.genai import types as genai_types  # type: ignore
+            gen_config = genai_types.GenerateContentConfig(max_output_tokens=3000)
+        except Exception:
+            pass  # graceful fallback if SDK shape differs
+
+        kwargs: dict = {
+            "model": "gemini-3-flash-preview",
+            "contents": prompt,
+        }
+        if gen_config is not None:
+            kwargs["config"] = gen_config
+
+        response = client.models.generate_content(**kwargs)
         text = getattr(response, "text", None)
         if text and text.strip():
             return text.strip()
