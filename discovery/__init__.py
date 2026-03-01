@@ -1,1 +1,0 @@
-# Source discovery package
