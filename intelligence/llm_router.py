@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 HF_API_URL = "https://router.huggingface.co/v1/chat/completions"
 HF_MODEL = "Qwen/Qwen3-8B:fastest"
-HF_TIMEOUT_SEC = 120
+HF_TIMEOUT_SEC = 90
 HF_MAX_TRIES = 2
 
 GEMINI_MODEL = "gemini-3-flash-preview"  # stable flash preview
@@ -38,7 +38,7 @@ GEMINI_MAX_TRIES = 2
 # Step 1: Raised from 1200 → 3000 to prevent mid-sentence/mid-URL truncation.
 # At ~4 chars/token, 1200 yielded ~4800 chars which could cut before model finished.
 # 8000 is a safe ceiling for all commands including the richest (dailybrief).
-MAX_TOKENS = 8000
+MAX_TOKENS = 5000
 
 
 # ──────────────────────────────────────────────────────────────────────────────
