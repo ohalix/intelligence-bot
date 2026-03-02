@@ -38,7 +38,7 @@ GEMINI_MAX_TRIES = 2
 # Step 1: Raised from 1200 → 3000 to prevent mid-sentence/mid-URL truncation.
 # At ~4 chars/token, 1200 yielded ~4800 chars which could cut before model finished.
 # 8000 is a safe ceiling for all commands including the richest (dailybrief).
-MAX_TOKENS = 5000
+MAX_TOKENS = 8000
 
 
 # ──────────────────────────────────────────────────────────────────────────────
