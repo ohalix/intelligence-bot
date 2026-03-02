@@ -177,12 +177,13 @@ async def funding_from_defillama_raises(session: aiohttp.ClientSession, since: d
         name = (r.get("name") or r.get("project") or "").strip()
         round_ = (r.get("round") or "").strip()
         amount = r.get("amount") or r.get("amountUsd") or ""
-        urlp = (r.get("link") or r.get("url") or "").strip()
+        sector = r.get("sector")
+        urlp = (r.get("source") or r.get("url") or "").strip()
 
         title = "Funding: " + name
         if round_:
             title += f" ({round_})"
-        desc = f"Amount: {amount}" if amount else ""
+        desc = f"Amount: {amount}. {sector}" if amount else "" 
         items.append(
             {
                 "source": "funding",
