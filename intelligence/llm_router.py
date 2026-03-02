@@ -1,6 +1,6 @@
 """LLM Router: Hugging Face → Gemini fallback chain.
 
-Primary:  Hugging Face Router (OpenAI-compatible completions API) via aiohttp
+Primary:  Hugging Face Router (Qwen3 is the latest generation of large language models in Qwen series) via aiohttp
 Fallback: Google Gemini via google-genai SDK (sync, run in executor)
 
 Design:
