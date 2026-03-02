@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 HF_API_URL = "https://router.huggingface.co/v1/chat/completions"
 HF_MODEL = "Qwen/Qwen3-8B:fastest"
-HF_TIMEOUT_SEC = 30
+HF_TIMEOUT_SEC = 120
 HF_MAX_TRIES = 2
 
 GEMINI_MODEL = "gemini-3-flash-preview"  # stable flash preview
